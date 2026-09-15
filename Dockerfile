@@ -4,25 +4,12 @@ FROM python:3.10-slim
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
-    libglib2.0-0 \
-    libnss3 \
-    libatk-1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxext6 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libpango-1.0-0 \
-    libcairo2 \
-    libasound2 \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+ENV TZ=Asia/Kolkata
 
 # Install Python requirements
 COPY requirements.txt /app/
@@ -30,9 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install --with-deps chromium
 
 # Copy script files
-COPY app.py bot.py /app/
+COPY app.py bot.py mailer.py /app/
 
 # Port configurations expose for email webhooks
 EXPOSE 5000
 
-CMD ["python", "app.py"]
+ENV DISPLAY=:99
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x800x24 -nolisten tcp & sleep 2; exec python app.py"]

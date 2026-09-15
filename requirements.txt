@@ -2,3 +2,4 @@ flask
 jinja2
 playwright
 python-dotenv
+pw-stealth-enhanced

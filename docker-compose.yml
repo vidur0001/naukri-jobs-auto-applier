@@ -6,8 +6,13 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - ./naukri_profile:/app/naukri_profile
+      - ./naukri_storage_state.json:/app/naukri_storage_state.json
       - ./config.json:/app/config.json
+      - ./decisions:/app/decisions
+      - ./seen_jobs.json:/app/seen_jobs.json
+      - ./daily_stats.json:/app/daily_stats.json
     env_file:
       - .env
+    environment:
+      - APP_BASE_URL=http://13.61.172.107:5000
     restart: unless-stopped

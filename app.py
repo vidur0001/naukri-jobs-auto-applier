@@ -1,18 +1,25 @@
 import os
 import json
 import subprocess
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from flask import Flask, request, jsonify, render_template_string
+import time
+import threading
+from datetime import datetime, date
+from flask import Flask, request, render_template_string
 from dotenv import load_dotenv
+from mailer import send_email
 
 load_dotenv()
 
 app = Flask(__name__)
 
 # System Configurations
-CONFIG_PATH = os.getenv("CONFIG_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.getenv("CONFIG_PATH", os.path.join(BASE_DIR, "config.json"))
+DECISIONS_DIR = os.getenv("DECISIONS_DIR", os.path.join(BASE_DIR, "decisions"))
+os.makedirs(DECISIONS_DIR, exist_ok=True)
+PID_FILE = os.path.join(BASE_DIR, "bot.pid")
+APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5000")
+DAILY_STATS_PATH = os.path.join(BASE_DIR, "daily_stats.json")
 DEFAULT_PROFILE = {
     "target_roles": ["Software Engineer", "Associate Software Engineer", "Backend Developer", "SRE Engineer", "DevOps Engineer"],
     "filters": {
@@ -57,44 +64,114 @@ EMAIL_HTML_TEMPLATE = """
     </table>
     <br/>
     <div style="margin-top: 15px;">
-        <a href="http://localhost:5000/approve" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">🚀 Approve & Run Now</a>
-        <a href="http://localhost:5000/edit" style="background-color: #2196F3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;">📝 Edit Configuration Details</a>
+        <a href="{{ base_url }}/start" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">▶️ Start Bot</a>
+        <a href="{{ base_url }}/stop" style="background-color: #f44336; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">⏹️ Stop Bot</a>
+        <a href="{{ base_url }}/edit" style="background-color: #2196F3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;">📝 Edit Configuration Details</a>
     </div>
 </body>
 </html>
 """
 
+def is_bot_running():
+    if not os.path.exists(PID_FILE):
+        return False
+    try:
+        with open(PID_FILE, "r") as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)  # signal 0: just checks if the process exists
+        # A PID existing is not enough - PIDs get reused (e.g. by Xvfb) after a
+        # container restart or a crashed bot process. Verify the process is
+        # actually our bot.py before trusting the PID file.
+        cmdline_path = f"/proc/{pid}/cmdline"
+        if os.path.exists(cmdline_path):
+            with open(cmdline_path, "rb") as cf:
+                cmdline = cf.read().decode(errors="ignore")
+            if "bot.py" not in cmdline:
+                os.remove(PID_FILE)
+                return False
+        return True
+    except (OSError, ValueError):
+        try:
+            os.remove(PID_FILE)
+        except OSError:
+            pass
+        return False
+
+def start_bot():
+    if is_bot_running():
+        return False
+    bot_path = os.path.join(BASE_DIR, "bot.py")
+    proc = subprocess.Popen(["python", bot_path])
+    with open(PID_FILE, "w") as f:
+        f.write(str(proc.pid))
+    return True
+
+def stop_bot():
+    if not os.path.exists(PID_FILE):
+        return False
+    try:
+        with open(PID_FILE, "r") as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 15)  # SIGTERM
+    except (OSError, ValueError):
+        pass
+    finally:
+        os.remove(PID_FILE)
+    return True
+
 def send_approval_email(config):
-    # Setup SMTP configurations using your server options (Environment Variables recommended)
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT", 587))
-    sender_email = os.getenv("SENDER_EMAIL", "your-bot-email@gmail.com")
-    sender_password = os.getenv("SENDER_PASSWORD", "your-app-password")
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "🚀 Action Required: Approve Auto-Apply Batch Execution"
-    msg["From"] = sender_email
-    msg["To"] = config["email_target"]
-
-    # Render template string manually for formatting efficiency
     from jinja2 import Template
     html_body = Template(EMAIL_HTML_TEMPLATE).render(
         roles=", ".join(config["target_roles"]),
         locations=", ".join(config["filters"]["locations"]),
         current_ctc=config["questionnaire_answers"]["current_ctc"],
         expected_ctc=config["questionnaire_answers"]["expected_ctc"],
-        skills=config["questionnaire_answers"]["skills"]
+        skills=config["questionnaire_answers"]["skills"],
+        base_url=APP_BASE_URL
     )
-    msg.attach(MIMEText(html_body, "html"))
+    send_email(config["email_target"], "🐳 Naukri Bot is running via Docker - control it here", html_body)
 
+def send_daily_summary_email(email_target, for_date=None):
+    for_date = for_date or date.today().isoformat()
     try:
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(sender_email, sender_password)
-            server.sendmail(sender_email, config["email_target"], msg.as_string())
-        print("[+] Monitoring email sent successfully to Vidur.")
-    except Exception as e:
-        print(f"[X] Failed to send email update notification: {e}")
+        with open(DAILY_STATS_PATH, "r") as f:
+            stats = json.load(f)
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        stats = {}
+
+    day_stats = stats.get(for_date, {"found": 0, "applied": 0})
+    found = day_stats.get("found", 0)
+    applied = day_stats.get("applied", 0)
+    skipped_or_pending = max(found - applied, 0)
+
+    html_body = f"""
+    <html><body style="font-family: Arial, sans-serif; color: #333;">
+        <h2 style="color: #2196F3;">📊 Daily Summary - {for_date}</h2>
+        <table style="border-collapse: collapse; width: 100%; max-width: 500px;">
+            <tr><td style="padding:8px;border:1px solid #ddd;"><b>Decision emails received</b></td><td style="padding:8px;border:1px solid #ddd;">{found}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd;"><b>Companies applied to</b></td><td style="padding:8px;border:1px solid #ddd;">{applied}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd;"><b>Skipped / no response</b></td><td style="padding:8px;border:1px solid #ddd;">{skipped_or_pending}</td></tr>
+        </table>
+        <p style="margin-top:15px;color:#888;">Applied {applied} out of {found} jobs the bot found and emailed you about today.</p>
+    </body></html>
+    """
+    send_email(email_target, f"📊 Daily Summary ({for_date}): Applied {applied}/{found}", html_body)
+
+def daily_summary_scheduler():
+    # Sends a summary email once per day at 23:59 local time. The container
+    # sets TZ=Asia/Kolkata, so datetime.now() already reflects IST - no
+    # separate timezone conversion is needed.
+    last_sent_date = None
+    while True:
+        now = datetime.now()
+        if now.hour == 23 and now.minute == 59 and last_sent_date != now.date():
+            try:
+                config = load_config()
+                send_daily_summary_email(config["email_target"])
+                last_sent_date = now.date()
+            except Exception as e:
+                print(f"[-] Failed to send daily summary email: {e}")
+        time.sleep(30)
 
 @app.route("/")
 def index():
@@ -102,12 +179,61 @@ def index():
     send_approval_email(config)
     return "<h3>Email notification sent to vidursharma8035@gmail.com. Monitor active.</h3>"
 
+@app.route("/start")
 @app.route("/approve")
 def approve_and_run():
-    print("[+] Approval webhook received. Initializing Playwright pipeline workflow...")
-    # Fire off bot.py execution async or via subprocess safely
-    subprocess.Popen(["python", "/app/bot.py"])
-    return "<h2>Application runner approved! Background container processing launched successfully.</h2>"
+    started = start_bot()
+    if started:
+        print("[+] Start webhook received. Bot subprocess launched.")
+        return "<h2>Bot started! It will begin scanning and email you when it finds jobs.</h2>"
+    return "<h2>Bot is already running.</h2>"
+
+@app.route("/stop")
+def stop_and_halt():
+    stopped = stop_bot()
+    if stopped:
+        print("[+] Stop webhook received. Bot subprocess terminated.")
+        return "<h2>Bot stopped. Use the Start Bot link anytime to resume.</h2>"
+    return "<h2>Bot was not running.</h2>"
+
+@app.route("/decide/<job_id>")
+def decide(job_id):
+    action = request.args.get("action")
+    if action not in ("apply", "skip"):
+        return "<h2>Invalid action.</h2>", 400
+
+    decision_file = os.path.join(DECISIONS_DIR, f"{job_id}.json")
+    with open(decision_file, "w") as f:
+        json.dump({"action": action}, f)
+
+    print(f"[+] Decision recorded for job {job_id}: {action}")
+    label = "Apply" if action == "apply" else "Skip"
+    return f"<h2>Recorded: {label} this job. The bot will continue shortly. You can close this tab.</h2>"
+
+@app.route("/clarify/<question_id>", methods=["GET", "POST"])
+def clarify(question_id):
+    # Used when the bot hits a form field it doesn't recognize while applying
+    # to a job. It pauses and waits here for you to type in the right answer.
+    clarify_file = os.path.join(DECISIONS_DIR, f"clarify_{question_id}.json")
+    if request.method == "POST":
+        value = request.form.get("value", "").strip()
+        with open(clarify_file, "w") as f:
+            json.dump({"value": value}, f)
+        print(f"[+] Clarification recorded for {question_id}: {value}")
+        return "<h2>Got it! The bot will use your answer and continue. You can close this tab.</h2>"
+
+    label = request.args.get("label", "this field")
+    job_title = request.args.get("job_title", "")
+    company = request.args.get("company", "")
+    return render_template_string("""
+        <h3>Bot needs your help</h3>
+        <p>While applying to <b>{{ job_title }}</b> @ <b>{{ company }}</b>, the bot found a form field it didn't
+        recognize: <b>{{ label }}</b></p>
+        <form method="POST">
+            Your answer: <input type="text" name="value" style="width:300px;"><br><br>
+            <input type="submit" value="Send Answer">
+        </form>
+    """, label=label, job_title=job_title, company=company)
 
 @app.route("/edit", methods=["GET", "POST"])
 def edit_config():
@@ -129,4 +255,8 @@ def edit_config():
     """, ctc=config["questionnaire_answers"]["expected_ctc"], skills=config["questionnaire_answers"]["skills"])
 
 if __name__ == "__main__":
+    # Notify immediately on container startup so you don't have to visit the site manually.
+    # Sent in a background thread so a slow/unreachable SMTP server never delays Flask binding to the port.
+    threading.Thread(target=send_approval_email, args=(load_config(),), daemon=True).start()
+    threading.Thread(target=daily_summary_scheduler, daemon=True).start()
     app.run(host="0.0.0.0", port=5000)
