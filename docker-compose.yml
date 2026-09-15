@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  naukri-bot:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./naukri_profile:/app/naukri_profile
+      - ./config.json:/app/config.json
+    environment:
+      - SMTP_SERVER=smtp.gmail.com
+      - SMTP_PORT=587
+      - SENDER_EMAIL=your-system-bot-email@gmail.com
+      - SENDER_PASSWORD=your-gmail-app-password
+    restart: unless-stopped
