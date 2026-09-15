@@ -9,7 +9,7 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 
 # System Configurations
-CONFIG_PATH = "/app/config.json"
+CONFIG_PATH = os.getenv("CONFIG_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"))
 DEFAULT_PROFILE = {
     "target_roles": ["Software Engineer", "Associate Software Engineer", "Backend Developer", "SRE Engineer", "DevOps Engineer"],
     "filters": {

@@ -25,8 +25,9 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Install Python requirements
-RUN pip install playwright flask jinja2
-RUN playwright install chromium
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
+RUN playwright install --with-deps chromium
 
 # Copy script files
 COPY app.py bot.py /app/

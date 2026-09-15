@@ -4,8 +4,9 @@ import os
 import json
 from playwright.async_api import async_playwright
 
-USER_DATA_DIR = "/app/naukri_profile"
-CONFIG_PATH = "/app/config.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+USER_DATA_DIR = os.getenv("USER_DATA_DIR", os.path.join(BASE_DIR, "naukri_profile"))
+CONFIG_PATH = os.getenv("CONFIG_PATH", os.path.join(BASE_DIR, "config.json"))
 
 def load_config():
     with open(CONFIG_PATH, "r") as f:
