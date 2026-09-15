@@ -5,6 +5,9 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from flask import Flask, request, jsonify, render_template_string
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 
