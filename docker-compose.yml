@@ -8,9 +8,6 @@ services:
     volumes:
       - ./naukri_profile:/app/naukri_profile
       - ./config.json:/app/config.json
-    environment:
-      - SMTP_SERVER=smtp.gmail.com
-      - SMTP_PORT=587
-      - SENDER_EMAIL=your-system-bot-email@gmail.com
-      - SENDER_PASSWORD=your-gmail-app-password
+    env_file:
+      - .env
     restart: unless-stopped
