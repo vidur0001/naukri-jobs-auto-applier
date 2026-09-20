@@ -7,6 +7,7 @@ from playwright.async_api import async_playwright
 from pw_stealth_enhanced import apply_stealth
 from dotenv import load_dotenv
 from mailer import send_email
+import ai_helper
 
 load_dotenv()
 
@@ -21,10 +22,14 @@ CONFIG_PATH = os.getenv("CONFIG_PATH", os.path.join(BASE_DIR, "config.json"))
 DECISIONS_DIR = os.getenv("DECISIONS_DIR", os.path.join(BASE_DIR, "decisions"))
 SEEN_JOBS_PATH = os.getenv("SEEN_JOBS_PATH", os.path.join(BASE_DIR, "seen_jobs.json"))
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5000")
-DECISION_POLL_INTERVAL = 5      # seconds between checks for your response
-DECISION_TIMEOUT = 3600         # give up waiting after 1 hour and skip the job
+DECISION_POLL_INTERVAL = 3      # seconds between checks for your response
+SKIP_GRACE_PERIOD = 45          # seconds to allow a "Skip" click before auto-applying
+AUTO_APPLY_PAUSE_FLAG = os.path.join(BASE_DIR, "auto_apply_paused.flag")
 
 os.makedirs(DECISIONS_DIR, exist_ok=True)
+
+def auto_apply_paused():
+    return os.path.exists(AUTO_APPLY_PAUSE_FLAG)
 
 def load_config():
     with open(CONFIG_PATH, "r") as f:
@@ -72,12 +77,28 @@ def record_stat(kind):
 
 def send_job_decision_email(email_target, job_id, title, company, location, link,
                              experience="Not specified", salary="Not disclosed",
-                             job_desc="Not available - see full posting via the link below."):
-    decide_apply = f"{APP_BASE_URL}/decide/{job_id}?action=apply"
+                             job_desc="Not available - see full posting via the link below.",
+                             ai_score=None, ai_reasoning=None, ai_summary=None):
     decide_skip = f"{APP_BASE_URL}/decide/{job_id}?action=skip"
+    pause_url = f"{APP_BASE_URL}/auto-apply/pause"
+    ai_html = ""
+    if ai_score is not None:
+        ai_html = f"""
+        <h3 style="color:#333;margin-top:15px;">🤖 AI Match Assessment</h3>
+        <p style="max-width:600px;background:#eef7ee;padding:12px;border-radius:4px;">
+            <b>Relevance Score:</b> {ai_score}/100<br/>
+            <b>Reasoning:</b> {ai_reasoning or 'N/A'}
+        </p>
+        """
+        if ai_summary:
+            ai_html += f"""
+            <h3 style="color:#333;margin-top:10px;">🤖 AI Summary</h3>
+            <p style="max-width:600px;background:#eef2f7;padding:12px;border-radius:4px;white-space:pre-wrap;">{ai_summary}</p>
+            """
     html_body = f"""
     <html><body style="font-family: Arial, sans-serif; color: #333;">
         <h2 style="color: #4CAF50;">🔎 New Job Found</h2>
+        {ai_html}
         <table style="border-collapse: collapse; width: 100%; max-width: 600px;">
             <tr><td style="padding:8px;border:1px solid #ddd;"><b>Title</b></td><td style="padding:8px;border:1px solid #ddd;">{title}</td></tr>
             <tr><td style="padding:8px;border:1px solid #ddd;"><b>Company</b></td><td style="padding:8px;border:1px solid #ddd;">{company}</td></tr>
@@ -89,25 +110,33 @@ def send_job_decision_email(email_target, job_id, title, company, location, link
         <h3 style="color:#333;margin-top:15px;">Job Description</h3>
         <p style="max-width:600px;background:#f7f7f7;padding:12px;border-radius:4px;white-space:pre-wrap;">{job_desc}</p>
         <br/>
-        <a href="{decide_apply}" style="background-color:#4CAF50;color:white;padding:10px 20px;text-decoration:none;border-radius:4px;font-weight:bold;margin-right:10px;">✅ Apply</a>
-        <a href="{decide_skip}" style="background-color:#f44336;color:white;padding:10px 20px;text-decoration:none;border-radius:4px;font-weight:bold;">❌ Skip</a>
-        <p style="margin-top:15px;color:#888;">The bot is paused and waiting for your decision. It will move to the next job once you respond (or after 1 hour if no response).</p>
+        <a href="{decide_skip}" style="background-color:#f44336;color:white;padding:10px 20px;text-decoration:none;border-radius:4px;font-weight:bold;margin-right:10px;">❌ Skip This Job</a>
+        <a href="{pause_url}" style="background-color:#FF9800;color:white;padding:10px 20px;text-decoration:none;border-radius:4px;font-weight:bold;">⏸️ Pause All Auto-Apply</a>
+        <p style="margin-top:15px;color:#888;">This job passed the AI relevance filter and will be auto-applied in about {SKIP_GRACE_PERIOD} seconds unless you click Skip above. Use "Pause All Auto-Apply" to stop applying to any job until you resume.</p>
     </body></html>
     """
-    send_email(email_target, f"🔎 New Job Found: {title} @ {company}", html_body)
+    send_email(email_target, f"🔎 Auto-Applying Soon: {title} @ {company}", html_body)
 
-async def wait_for_decision(job_id):
+async def wait_for_skip(job_id):
+    """Gives a short window for a 'Skip' click before auto-applying.
+    Returns 'skip' if clicked within the grace period, if auto-apply is
+    globally paused, or else 'apply' once the window elapses."""
     decision_file = os.path.join(DECISIONS_DIR, f"{job_id}.json")
     start = time.time()
-    while time.time() - start < DECISION_TIMEOUT:
+    while time.time() - start < SKIP_GRACE_PERIOD:
         if os.path.exists(decision_file):
             with open(decision_file, "r") as f:
                 data = json.load(f)
             os.remove(decision_file)
-            return data.get("action", "skip")
+            return data.get("action", "apply")
+        if auto_apply_paused():
+            print(f"   [-] Auto-apply is paused. Skipping job {job_id} for now.")
+            return "skip"
         await asyncio.sleep(DECISION_POLL_INTERVAL)
-    print(f"   [!] No response received for job {job_id} within timeout. Skipping.")
-    return "skip"
+    if auto_apply_paused():
+        print(f"   [-] Auto-apply is paused. Skipping job {job_id} for now.")
+        return "skip"
+    return "apply"
 
 async def human_delay(min_sec=2, max_sec=5):
     await asyncio.sleep(random.uniform(min_sec, max_sec))
@@ -174,15 +203,26 @@ async def handle_application_form(page, config, job_title="", comp_name=""):
                     await inp.fill(value)
                     filled_fields["Skills"] = value
                 elif label.strip():
-                    # Unrecognized field - pause and ask you directly instead of
-                    # guessing or leaving it blank.
-                    question_id = f"{int(time.time()*1000)}-{random.randint(1000,9999)}"
-                    print(f"   [?] Unrecognized field '{label}'. Emailing you for clarification (question_id={question_id})...")
-                    send_clarification_email(config["email_target"], question_id, label, job_title, comp_name)
-                    value = await wait_for_clarification(question_id)
-                    if value:
-                        await inp.fill(value)
-                        filled_fields[label] = value
+                    # Unrecognized field - try the AI helper first (grounded in your
+                    # real resume profile) since these are usually open-ended
+                    # questionnaire questions. Only fall back to emailing you for
+                    # manual clarification if AI is unavailable or fails.
+                    ai_value = None
+                    if config.get("ai", {}).get("auto_answer_questions", True):
+                        ai_value = ai_helper.answer_question(label, job_title=job_title, company=comp_name)
+
+                    if ai_value:
+                        await inp.fill(ai_value)
+                        filled_fields[label] = ai_value
+                        print(f"   [AI] Answered field '{label}' -> {ai_value[:80]}...")
+                    else:
+                        question_id = f"{int(time.time()*1000)}-{random.randint(1000,9999)}"
+                        print(f"   [?] Unrecognized field '{label}'. Emailing you for clarification (question_id={question_id})...")
+                        send_clarification_email(config["email_target"], question_id, label, job_title, comp_name)
+                        value = await wait_for_clarification(question_id)
+                        if value:
+                            await inp.fill(value)
+                            filled_fields[label] = value
 
             submit_btn = page.locator("button:has-text('Submit'), button:has-text('Confirm'), .save-button").first
             if await submit_btn.count() > 0:
@@ -393,20 +433,36 @@ async def run_auto_apply():
                         except Exception as jd_err:
                             print(f"   [-] Could not fetch full JD for {job_title} @ {comp_name}: {jd_err}")
 
-                        # Pause and ask for approval via email before applying
+                        # AI relevance scoring + JD summarization (Groq/Llama). Degrades
+                        # gracefully to a neutral score if GROQ_API_KEY is missing or the
+                        # API call fails - never blocks the pipeline.
+                        ai_result = ai_helper.score_relevance(job_desc_snippet)
+                        ai_summary = ai_helper.summarize_jd(job_desc_snippet)
+                        min_score = config.get("ai", {}).get("min_relevance_score", 0)
+                        if ai_result["score"] < min_score:
+                            print(f"   [AI] Skipping (score {ai_result['score']} < {min_score}): {job_title} @ {comp_name} - {ai_result['reasoning']}")
+                            mark_job_seen(seen_jobs, link, "ai_skip")
+                            continue
+
+                        # Auto-apply by default, but give a short grace period
+                        # for you to click "Skip" from the email before the bot
+                        # actually submits - keeps throughput high while still
+                        # letting you catch mistakes (bad match, blacklisted
+                        # company that slipped through, etc.) before it's too late.
                         job_id = f"{int(time.time()*1000)}-{random.randint(1000,9999)}"
                         send_job_decision_email(
                             config["email_target"], job_id, job_title, comp_name, location, link,
-                            experience=exact_experience, salary=exact_salary, job_desc=job_desc_snippet
+                            experience=exact_experience, salary=exact_salary, job_desc=job_desc_snippet,
+                            ai_score=ai_result["score"], ai_reasoning=ai_result["reasoning"], ai_summary=ai_summary
                         )
                         record_stat("found")
-                        print(f"   [?] Awaiting your decision for: {job_title} @ {comp_name} (job_id={job_id})")
-                        decision = await wait_for_decision(job_id)
+                        decision = await wait_for_skip(job_id)
                         mark_job_seen(seen_jobs, link, decision)
 
                         if decision != "apply":
-                            print(f"   [-] Skipped: {job_title} @ {comp_name}")
+                            print(f"   [-] Skipped by user: {job_title} @ {comp_name}")
                             continue
+                        print(f"   [+] Grace period elapsed, auto-applying: {job_title} @ {comp_name}")
 
                         job_page = await context.new_page()
                         await job_page.goto(link, timeout=30000)

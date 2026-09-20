@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install --with-deps chromium
 
 # Copy script files
-COPY app.py bot.py mailer.py /app/
+COPY app.py bot.py mailer.py ai_helper.py config.json profile.json /app/
 
 # Port configurations expose for email webhooks
 EXPOSE 5000

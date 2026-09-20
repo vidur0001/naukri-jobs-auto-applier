@@ -20,3 +20,4 @@ export_storage_state.py
 check_login_out.txt
 ls_out.txt
 stealth_err.txt
+profile.json

@@ -18,6 +18,7 @@ CONFIG_PATH = os.getenv("CONFIG_PATH", os.path.join(BASE_DIR, "config.json"))
 DECISIONS_DIR = os.getenv("DECISIONS_DIR", os.path.join(BASE_DIR, "decisions"))
 os.makedirs(DECISIONS_DIR, exist_ok=True)
 PID_FILE = os.path.join(BASE_DIR, "bot.pid")
+AUTO_APPLY_PAUSE_FLAG = os.path.join(BASE_DIR, "auto_apply_paused.flag")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5000")
 DAILY_STATS_PATH = os.path.join(BASE_DIR, "daily_stats.json")
 DEFAULT_PROFILE = {
@@ -67,6 +68,10 @@ EMAIL_HTML_TEMPLATE = """
         <a href="{{ base_url }}/start" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">▶️ Start Bot</a>
         <a href="{{ base_url }}/stop" style="background-color: #f44336; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">⏹️ Stop Bot</a>
         <a href="{{ base_url }}/edit" style="background-color: #2196F3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;">📝 Edit Configuration Details</a>
+    </div>
+    <div style="margin-top: 10px;">
+        <a href="{{ base_url }}/auto-apply/pause" style="background-color: #FF9800; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">⏸️ Pause Auto-Apply</a>
+        <a href="{{ base_url }}/auto-apply/resume" style="background-color: #9C27B0; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;">▶️ Resume Auto-Apply</a>
     </div>
 </body>
 </html>
@@ -195,6 +200,20 @@ def stop_and_halt():
         print("[+] Stop webhook received. Bot subprocess terminated.")
         return "<h2>Bot stopped. Use the Start Bot link anytime to resume.</h2>"
     return "<h2>Bot was not running.</h2>"
+
+@app.route("/auto-apply/pause")
+def pause_auto_apply():
+    with open(AUTO_APPLY_PAUSE_FLAG, "w") as f:
+        f.write("paused")
+    print("[+] Auto-apply paused via webhook.")
+    return "<h2>Auto-apply paused. The bot will keep scanning/emailing but won't submit any applications until you resume.</h2>"
+
+@app.route("/auto-apply/resume")
+def resume_auto_apply():
+    if os.path.exists(AUTO_APPLY_PAUSE_FLAG):
+        os.remove(AUTO_APPLY_PAUSE_FLAG)
+    print("[+] Auto-apply resumed via webhook.")
+    return "<h2>Auto-apply resumed. The bot will apply to matching jobs again.</h2>"
 
 @app.route("/decide/<job_id>")
 def decide(job_id):

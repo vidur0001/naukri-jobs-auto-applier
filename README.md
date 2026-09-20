@@ -1,31 +1,43 @@
 # Naukri.com Job Auto-Applier
 
-An autonomous bot that searches Naukri.com for matching jobs across multiple
-roles and cities, pauses for your approval before applying, fills out
-questionnaire forms automatically, and emails you at every step. Runs 24/7 on
-an AWS EC2 instance inside Docker.
+An autonomous, AI-assisted bot that searches Naukri.com for matching jobs
+across multiple roles and cities, scores each one for relevance with an LLM,
+auto-applies within a short human-override window, fills out questionnaire
+forms in natural language, and emails you at every step. Runs 24/7 on an
+AWS EC2 instance inside Docker.
 
 ## Features
 
 - **Multi-role, multi-city search** — loops through every combination of
   target roles and locations defined in `config.json` (e.g. 5 roles × 9
   cities = 45 searches per cycle).
-- **Human-in-the-loop approval** — for every new job found, an email is sent
-  with **✅ Apply** / **❌ Skip** buttons. The bot pauses until you respond
-  (or times out after 1 hour and skips).
-- **Automatic questionnaire filling** — recognizes common fields (CTC,
-  notice period, skills) and fills them from `config.json`. Unrecognized
-  fields trigger a **clarification email** so you can supply the answer
-  directly, and the bot waits for it before continuing.
+- **AI relevance scoring (Groq LLM)** — every job description is scored
+  0-100 against your resume profile before anything else happens; low-scoring
+  jobs are silently skipped so you never see noise.
+- **Auto-apply with a safety window** — once a job passes the relevance
+  filter, you get an email with the job details and a **Skip** button. If you
+  don't click it within a short grace period, the bot applies automatically —
+  keeping throughput high without fully removing human oversight.
+- **Global pause switch** — a **Pause Auto-Apply** control (email button or
+  webhook) instantly halts all future applications while the bot keeps
+  scanning and emailing, independent of any single job's decision.
+- **AI-powered questionnaire answering** — open-ended application questions
+  (e.g. "Tell us about yourself", "How do you handle failure?") are answered
+  automatically by an LLM in natural, human, first-person language grounded
+  strictly in your real resume — never fabricated anecdotes.
+- **Automatic structured field filling** — recognizes common fields (CTC,
+  notice period, skills) and fills them from `config.json`.
 - **Confirmation emails** — after each successful application, you get an
-  email with the job title, company, location, link, and your full profile
-  details used (experience, CTC, notice period, skills).
-- **Persistent login** — uses a saved Playwright `storage_state.json"
+  email with the job title, company, location, link, and every field/answer
+  submitted on your behalf.
+- **Persistent login** — uses a saved Playwright `storage_state.json`
   session (no password re-entry), portable across machines/containers.
 - **Bot-detection resistant** — runs Chromium in headed mode via Xvfb with
   stealth patches, since Naukri's Akamai WAF blocks headless browsers.
-- **Web-based start/stop control** — Flask endpoints (`/start`, `/stop`)
-  triggered from email links, usable from a phone browser.
+- **Web-based control panel** — Flask endpoints (`/start`, `/stop`,
+  `/auto-apply/pause`, `/auto-apply/resume`) triggered from email links,
+  usable from a phone browser.
+- **Daily summary emails** — a nightly digest of jobs found vs. applied.
 - **Always-on cloud hosting** — deployed on an AWS EC2 instance with an
   Elastic IP so the webhook URLs never change, and `restart: unless-stopped`
   so it recovers automatically from reboots/crashes.
@@ -34,11 +46,13 @@ an AWS EC2 instance inside Docker.
 
 | Component | Purpose |
 |---|---|
-| `app.py` | Flask server: app control (`/start`, `/stop`) and decision/clarification webhooks |
-| `bot.py` | Playwright automation: search, apply, form-filling, emails |
+| `app.py` | Flask server: app control (`/start`, `/stop`), auto-apply pause/resume, and decision/clarification webhooks |
+| `bot.py` | Playwright automation: search, AI scoring, auto-apply, form-filling, emails |
+| `ai_helper.py` | Groq LLM integration: relevance scoring, JD summarization, questionnaire answering |
 | `mailer.py` | SMTP email sending |
 | `login_setup.py` | One-time local script to log in to Naukri and save `naukri_storage_state.json` |
-| `config.json` | Target roles, locations, experience filter, questionnaire answers, blacklist |
+| `config.json` | Target roles, locations, experience filter, questionnaire answers, blacklist, AI settings |
+| `profile.json` | Structured resume profile used to ground AI scoring/answers |
 | `Dockerfile` | Python + Xvfb + Playwright Chromium image |
 | `docker-compose.yml` | Container definition, env vars, volumes, `APP_BASE_URL` |
 
@@ -51,13 +65,21 @@ an AWS EC2 instance inside Docker.
 3. For each `(location, role)` pair in `config.json`, it searches Naukri,
    iterates job cards, and skips anything already processed
    (`seen_jobs.json`) or blacklisted.
-4. For each new job, it emails you a decision request and waits for your
-   click (`/decide/<job_id>?action=apply|skip`).
-5. On **Apply**, it clicks Naukri's native Apply button, fills any
-   questionnaire fields it recognizes, asks for help via email on anything
-   it doesn't recognize, then sends a confirmation email with full details.
-6. Session cookies are refreshed and saved back to `naukri_storage_state.json`
-   at the end of each run.
+4. For each new job, it fetches the full job description and asks the Groq
+   LLM to score its relevance (0-100) against your resume profile
+   (`profile.json`). Jobs below the configured threshold are skipped silently.
+5. For jobs that pass, an email is sent immediately with the job details and
+   a **Skip** button. If no response arrives within the grace period, the
+   bot proceeds to apply automatically (unless auto-apply has been paused
+   globally via `/auto-apply/pause`).
+6. On applying, it clicks Naukri's native Apply button, fills recognized
+   structured fields (CTC, notice period, skills) from `config.json`, and
+   routes any open-ended questionnaire question through the LLM
+   (`ai_helper.answer_question`) to produce a natural, resume-grounded
+   answer — falling back to a clarification email only if AI is unavailable.
+7. A confirmation email is sent with every field/answer submitted, and
+   session cookies are refreshed and saved back to
+   `naukri_storage_state.json` at the end of each run.
 
 ## Deployment
 
