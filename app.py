@@ -1,10 +1,11 @@
 import os
 import json
+import secrets
 import subprocess
 import time
 import threading
 from datetime import datetime, date
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, abort
 from dotenv import load_dotenv
 from mailer import send_email
 
@@ -30,6 +31,19 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5000")
 # human can watch and click the "I'm human" checkbox remotely without SSH
 # access or running any scripts locally.
 NOVNC_PORT = os.getenv("NOVNC_PORT", "6080")
+# Same password x11vnc was started with (see Dockerfile CMD) - required so
+# the noVNC viewer can auto-fill it and connect without prompting.
+VNC_PASSWORD = os.getenv("VNC_PASSWORD", "changeme")
+# Random per-deploy token gating access to /solve-challenge*. Without the
+# correct ?token=... in the URL, the route 403s - this is what keeps the
+# live-browser viewer private even if the port/security-group is opened to
+# 0.0.0.0/0 for phone access, since only the email link carries the token.
+CHALLENGE_ACCESS_TOKEN = os.getenv("CHALLENGE_ACCESS_TOKEN") or secrets.token_urlsafe(24)
+
+def _require_challenge_token():
+    if request.args.get("token") != CHALLENGE_ACCESS_TOKEN:
+        abort(403)
+
 DAILY_STATS_PATH = os.path.join(BASE_DIR, "daily_stats.json")
 DEFAULT_PROFILE = {
     "target_roles": ["Software Engineer", "Associate Software Engineer", "Backend Developer", "SRE Engineer", "DevOps Engineer"],
@@ -227,10 +241,15 @@ def resume_auto_apply():
 
 @app.route("/solve-challenge")
 def solve_challenge():
+    _require_challenge_token()
     # Derive the noVNC host from whatever host the request came in on (works
     # whether APP_BASE_URL is an IP, a domain, or localhost during testing).
     host = request.host.split(":")[0]
-    novnc_url = f"http://{host}:{NOVNC_PORT}/vnc.html?autoconnect=true&resize=scale"
+    novnc_url = (
+        f"http://{host}:{NOVNC_PORT}/vnc.html?autoconnect=true&resize=scale"
+        f"&password={VNC_PASSWORD}"
+    )
+    resume_url = f"{APP_BASE_URL}/solve-challenge/resume?token={CHALLENGE_ACCESS_TOKEN}"
     return render_template_string("""
         <html><body style="font-family: Arial, sans-serif; color: #333; margin:0;">
             <div style="padding:12px 16px; background:#fff3e0; border-bottom:1px solid #ffcc80;">
@@ -245,10 +264,11 @@ def solve_challenge():
             </div>
             <iframe src="{{ novnc_url }}" style="width:100%; height:90vh; border:none;"></iframe>
         </body></html>
-    """, novnc_url=novnc_url, resume_url=f"{APP_BASE_URL}/solve-challenge/resume")
+    """, novnc_url=novnc_url, resume_url=resume_url)
 
 @app.route("/solve-challenge/resume")
 def solve_challenge_resume():
+    _require_challenge_token()
     with open(HUMAN_VERIFIED_FLAG, "w") as f:
         f.write("verified")
     print("[+] Human verification marked complete via webhook. Bot will resume shortly.")

@@ -28,6 +28,10 @@ AUTO_APPLY_PAUSE_FLAG = os.path.join(BASE_DIR, "auto_apply_paused.flag")
 # Written by app.py's /solve-challenge/resume webhook once a human has
 # clicked through Akamai's verification checkbox via the noVNC viewer.
 HUMAN_VERIFIED_FLAG = os.path.join(BASE_DIR, "human_verified.flag")
+# Must match the token app.py checks on /solve-challenge* (set explicitly in
+# .env so both processes agree - if left unset here while app.py falls back
+# to a random one, the emailed link would 403).
+CHALLENGE_ACCESS_TOKEN = os.getenv("CHALLENGE_ACCESS_TOKEN", "")
 
 os.makedirs(DECISIONS_DIR, exist_ok=True)
 
@@ -78,7 +82,7 @@ def alert_challenge_detected(email_target):
             "in your own browser tab, click the verification checkbox yourself, "
             "then click the \"resume\" button shown there. No local setup or "
             "scripts needed.</p>"
-            f"<p><a href='{APP_BASE_URL}/solve-challenge' style='background-color:#4CAF50;"
+            f"<p><a href='{APP_BASE_URL}/solve-challenge?token={CHALLENGE_ACCESS_TOKEN}' style='background-color:#4CAF50;"
             "color:white;padding:10px 20px;text-decoration:none;border-radius:4px;"
             "font-weight:bold;'>🧑\u200d💻 Do Human Verification Challenge</a></p>"
             "<p style='color:#888;'>If you don't respond within 20 minutes, this "
@@ -591,25 +595,12 @@ async def run_auto_apply():
 
                         if await is_challenge_page(job_page):
                             print(f"   [!] Akamai human-verification challenge detected on job page "
-                                  f"({job_title} @ {comp_name}). Pausing and waiting for human verification...")
+                                  f"({job_title} @ {comp_name}). Aborting this run early.")
                             alert_challenge_detected(config["email_target"])
-                            verified = await wait_for_human_verification()
-                            if not verified:
-                                print("   [X] Timed out waiting for human verification. Aborting this run.")
-                                await job_page.close()
-                                await context.close()
-                                await browser.close()
-                                return
-                            print("   [+] Human verification confirmed. Retrying this job page...")
-                            await job_page.reload(timeout=30000)
-                            await human_delay(3, 5)
-                            if await is_challenge_page(job_page):
-                                print("   [X] Challenge still present after verification. Aborting this run.")
-                                alert_challenge_detected(config["email_target"])
-                                await job_page.close()
-                                await context.close()
-                                await browser.close()
-                                return
+                            await job_page.close()
+                            await context.close()
+                            await browser.close()
+                            return
 
                         apply_btn = job_page.locator("button:has-text('Apply')").first
                         if await apply_btn.count() > 0:

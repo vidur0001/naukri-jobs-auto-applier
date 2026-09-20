@@ -28,4 +28,8 @@ COPY app.py bot.py mailer.py ai_helper.py config.json profile.json /app/
 EXPOSE 5000 6080
 
 ENV DISPLAY=:99
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x800x24 -nolisten tcp & sleep 2; x11vnc -display :99 -forever -shared -nopw -rfbport 5900 -bg -o /tmp/x11vnc.log; websockify -D --web=/usr/share/novnc 6080 localhost:5900; exec python app.py"]
+# VNC_PASSWORD (from .env) is stored to a storepasswd-format file at container
+# start, so the live browser feed itself requires a password even if port
+# 6080 is reachable from outside (defense in depth alongside the
+# CHALLENGE_ACCESS_TOKEN checked by Flask before the page is ever served).
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x800x24 -nolisten tcp & sleep 2; x11vnc -storepasswd \"${VNC_PASSWORD:-changeme}\" /tmp/vncpasswd.txt; x11vnc -display :99 -forever -shared -rfbauth /tmp/vncpasswd.txt -rfbport 5900 -bg -o /tmp/x11vnc.log; websockify -D --web=/usr/share/novnc 6080 localhost:5900; exec python app.py"]
