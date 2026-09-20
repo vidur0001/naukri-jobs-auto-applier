@@ -16,7 +16,24 @@ never a hard dependency for the pipeline to function.
 
 import os
 import json
+import re
 import functools
+
+
+def _extract_json_object(raw):
+    """Best-effort extraction of a JSON object from a possibly noisy/truncated
+    LLM response (e.g. wrapped in prose or code fences)."""
+    raw = raw.strip().strip("`")
+    if raw.lower().startswith("json"):
+        raw = raw[4:].strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        return json.loads(match.group(0))
+    raise ValueError(f"No valid JSON object found in response: {raw[:200]!r}")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
@@ -85,14 +102,14 @@ def score_relevance(jd_text, profile=None):
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=400,
+            max_tokens=800,
             reasoning_effort="low",
+            response_format={"type": "json_object"},
         )
         raw = (resp.choices[0].message.content or "").strip()
-        raw = raw.strip("`").replace("json\n", "").strip()
         if not raw:
             raise ValueError("empty response from model")
-        data = json.loads(raw)
+        data = _extract_json_object(raw)
         score = int(data.get("score", 50))
         reasoning = str(data.get("reasoning", ""))
         return {"score": max(0, min(100, score)), "reasoning": reasoning}
