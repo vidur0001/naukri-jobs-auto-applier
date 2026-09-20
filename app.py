@@ -19,7 +19,17 @@ DECISIONS_DIR = os.getenv("DECISIONS_DIR", os.path.join(BASE_DIR, "decisions"))
 os.makedirs(DECISIONS_DIR, exist_ok=True)
 PID_FILE = os.path.join(BASE_DIR, "bot.pid")
 AUTO_APPLY_PAUSE_FLAG = os.path.join(BASE_DIR, "auto_apply_paused.flag")
+# Written by this Flask process when the "I've solved it, resume" button is
+# clicked; bot.py polls for this file while it's paused on an Akamai
+# human-verification challenge, waiting for a person to click through it via
+# the noVNC viewer this app serves at /solve-challenge.
+HUMAN_VERIFIED_FLAG = os.path.join(BASE_DIR, "human_verified.flag")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5000")
+# noVNC/websockify (started by the container's entrypoint alongside Xvfb)
+# serves a live view of the SAME display the bot's browser renders to, so a
+# human can watch and click the "I'm human" checkbox remotely without SSH
+# access or running any scripts locally.
+NOVNC_PORT = os.getenv("NOVNC_PORT", "6080")
 DAILY_STATS_PATH = os.path.join(BASE_DIR, "daily_stats.json")
 DEFAULT_PROFILE = {
     "target_roles": ["Software Engineer", "Associate Software Engineer", "Backend Developer", "SRE Engineer", "DevOps Engineer"],
@@ -214,6 +224,35 @@ def resume_auto_apply():
         os.remove(AUTO_APPLY_PAUSE_FLAG)
     print("[+] Auto-apply resumed via webhook.")
     return "<h2>Auto-apply resumed. The bot will apply to matching jobs again.</h2>"
+
+@app.route("/solve-challenge")
+def solve_challenge():
+    # Derive the noVNC host from whatever host the request came in on (works
+    # whether APP_BASE_URL is an IP, a domain, or localhost during testing).
+    host = request.host.split(":")[0]
+    novnc_url = f"http://{host}:{NOVNC_PORT}/vnc.html?autoconnect=true&resize=scale"
+    return render_template_string("""
+        <html><body style="font-family: Arial, sans-serif; color: #333; margin:0;">
+            <div style="padding:12px 16px; background:#fff3e0; border-bottom:1px solid #ffcc80;">
+                <b>👀 You're viewing the bot's live browser.</b>
+                Click the "I'm not a robot" / verification checkbox on the page below,
+                the same way you would on any site. Once it clears and you see normal
+                Naukri content, click the button to let the bot continue.
+                <a href="{{ resume_url }}" style="background-color:#4CAF50; color:white; padding:8px 16px;
+                   text-decoration:none; border-radius:4px; font-weight:bold; margin-left:12px;">
+                   ✅ I've completed the verification, resume bot
+                </a>
+            </div>
+            <iframe src="{{ novnc_url }}" style="width:100%; height:90vh; border:none;"></iframe>
+        </body></html>
+    """, novnc_url=novnc_url, resume_url=f"{APP_BASE_URL}/solve-challenge/resume")
+
+@app.route("/solve-challenge/resume")
+def solve_challenge_resume():
+    with open(HUMAN_VERIFIED_FLAG, "w") as f:
+        f.write("verified")
+    print("[+] Human verification marked complete via webhook. Bot will resume shortly.")
+    return "<h2>Got it! The bot will check again and resume scanning shortly. You can close this tab.</h2>"
 
 @app.route("/decide/<job_id>")
 def decide(job_id):

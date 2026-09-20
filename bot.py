@@ -25,6 +25,9 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5000")
 DECISION_POLL_INTERVAL = 3      # seconds between checks for your response
 SKIP_GRACE_PERIOD = 45          # seconds to allow a "Skip" click before auto-applying
 AUTO_APPLY_PAUSE_FLAG = os.path.join(BASE_DIR, "auto_apply_paused.flag")
+# Written by app.py's /solve-challenge/resume webhook once a human has
+# clicked through Akamai's verification checkbox via the noVNC viewer.
+HUMAN_VERIFIED_FLAG = os.path.join(BASE_DIR, "human_verified.flag")
 
 os.makedirs(DECISIONS_DIR, exist_ok=True)
 
@@ -54,11 +57,11 @@ async def is_challenge_page(page):
 _last_challenge_alert_ts = 0
 
 def alert_challenge_detected(email_target):
-    # Throttle to at most one alert per 30 minutes so we don't spam the inbox
-    # while every subsequent batch keeps hitting the same wall.
+    # Throttle to at most one alert per 10 minutes so we don't spam the inbox
+    # while the bot is actively waiting on this same challenge to be solved.
     global _last_challenge_alert_ts
     now = time.time()
-    if now - _last_challenge_alert_ts < 1800:
+    if now - _last_challenge_alert_ts < 600:
         return
     _last_challenge_alert_ts = now
     try:
@@ -66,20 +69,44 @@ def alert_challenge_detected(email_target):
             email_target,
             "🛑 Naukri Bot Paused: Human-verification challenge detected",
             "<html><body style='font-family:Arial,sans-serif;color:#333;'>"
-            "<h2 style='color:#c0392b;'>Bot run stopped early</h2>"
+            "<h2 style='color:#c0392b;'>Bot is waiting for you</h2>"
             "<p>Naukri/Akamai served a bot-verification challenge page "
             "(\"check the box to let us know you're human\") instead of real "
-            "search results, so the current scan was aborted to avoid wasting "
-            "the run against a wall.</p>"
-            "<p><b>What to do:</b> wait a while before the next run (the block "
-            "is usually temporary/IP or session based), or refresh the session "
-            "by re-running <code>login_setup.py</code> locally and redeploying "
-            "<code>naukri_storage_state.json</code>. Scanning less frequently "
-            "also helps avoid retriggering it.</p>"
+            "search results. The bot has paused its browser exactly where it "
+            "hit the wall and is waiting for you to clear it.</p>"
+            "<p>Click the button below to open a live view of the bot's browser "
+            "in your own browser tab, click the verification checkbox yourself, "
+            "then click the \"resume\" button shown there. No local setup or "
+            "scripts needed.</p>"
+            f"<p><a href='{APP_BASE_URL}/solve-challenge' style='background-color:#4CAF50;"
+            "color:white;padding:10px 20px;text-decoration:none;border-radius:4px;"
+            "font-weight:bold;'>🧑\u200d💻 Do Human Verification Challenge</a></p>"
+            "<p style='color:#888;'>If you don't respond within 20 minutes, this "
+            "run will time out and stop automatically; the next scheduled run "
+            "will try again.</p>"
             "</body></html>"
         )
     except Exception as e:
         print(f"   [-] Could not send challenge-alert email: {e}")
+
+async def wait_for_human_verification(timeout=1200, poll_interval=5):
+    """Blocks (async-friendly) until app.py's /solve-challenge/resume webhook
+    writes HUMAN_VERIFIED_FLAG, or until `timeout` seconds elapse.
+
+    Returns True if a human confirmed they solved the challenge, False on
+    timeout.
+    """
+    # Clear any stale flag left over from a previous, unrelated resume click.
+    if os.path.exists(HUMAN_VERIFIED_FLAG):
+        os.remove(HUMAN_VERIFIED_FLAG)
+    waited = 0
+    while waited < timeout:
+        if os.path.exists(HUMAN_VERIFIED_FLAG):
+            os.remove(HUMAN_VERIFIED_FLAG)
+            return True
+        await asyncio.sleep(poll_interval)
+        waited += poll_interval
+    return False
 
 def load_config():
     with open(CONFIG_PATH, "r") as f:
@@ -435,11 +462,23 @@ async def run_auto_apply():
 
                 if await is_challenge_page(page):
                     print(f"   [!] Akamai human-verification challenge detected on search page "
-                          f"({role} in {location}). Aborting this run early.")
+                          f"({role} in {location}). Pausing and waiting for human verification...")
                     alert_challenge_detected(config["email_target"])
-                    await context.close()
-                    await browser.close()
-                    return
+                    verified = await wait_for_human_verification()
+                    if not verified:
+                        print("   [X] Timed out waiting for human verification. Aborting this run.")
+                        await context.close()
+                        await browser.close()
+                        return
+                    print("   [+] Human verification confirmed. Retrying this search page...")
+                    await page.reload(timeout=30000)
+                    await human_delay(3, 5)
+                    if await is_challenge_page(page):
+                        print("   [X] Challenge still present after verification. Aborting this run.")
+                        alert_challenge_detected(config["email_target"])
+                        await context.close()
+                        await browser.close()
+                        return
 
                 # Naukri's search results wrap each card in a "srp-jobtuple-wrapper"
                 # div (the older "srp-jobtuple" class is no longer used).
@@ -552,12 +591,25 @@ async def run_auto_apply():
 
                         if await is_challenge_page(job_page):
                             print(f"   [!] Akamai human-verification challenge detected on job page "
-                                  f"({job_title} @ {comp_name}). Aborting this run early.")
+                                  f"({job_title} @ {comp_name}). Pausing and waiting for human verification...")
                             alert_challenge_detected(config["email_target"])
-                            await job_page.close()
-                            await context.close()
-                            await browser.close()
-                            return
+                            verified = await wait_for_human_verification()
+                            if not verified:
+                                print("   [X] Timed out waiting for human verification. Aborting this run.")
+                                await job_page.close()
+                                await context.close()
+                                await browser.close()
+                                return
+                            print("   [+] Human verification confirmed. Retrying this job page...")
+                            await job_page.reload(timeout=30000)
+                            await human_delay(3, 5)
+                            if await is_challenge_page(job_page):
+                                print("   [X] Challenge still present after verification. Aborting this run.")
+                                alert_challenge_detected(config["email_target"])
+                                await job_page.close()
+                                await context.close()
+                                await browser.close()
+                                return
 
                         apply_btn = job_page.locator("button:has-text('Apply')").first
                         if await apply_btn.count() > 0:

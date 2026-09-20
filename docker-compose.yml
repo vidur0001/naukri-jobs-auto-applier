@@ -5,6 +5,7 @@ services:
     build: .
     ports:
       - "5000:5000"
+      - "6080:6080"
     volumes:
       - ./naukri_storage_state.json:/app/naukri_storage_state.json
       - ./config.json:/app/config.json
