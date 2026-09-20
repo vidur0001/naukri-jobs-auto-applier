@@ -31,6 +31,56 @@ os.makedirs(DECISIONS_DIR, exist_ok=True)
 def auto_apply_paused():
     return os.path.exists(AUTO_APPLY_PAUSE_FLAG)
 
+# Akamai (Naukri's bot-management WAF) sometimes serves an interstitial
+# "check the box to let us know you're human" challenge page instead of the
+# real search results. When that happens, .srp-jobtuple-wrapper legitimately
+# has 0 matches, which used to get silently misread as "0 jobs found" or
+# "no Apply button" - burning through the whole batch list against a wall.
+# Detect it explicitly so we can bail out early and alert instead.
+CHALLENGE_MARKERS = [
+    "check the box to let us know you're human",
+    "check the box to let us know you\u2019re human",
+    "verify you are human",
+    "additional verification required",
+]
+
+async def is_challenge_page(page):
+    try:
+        body_text = (await page.locator("body").inner_text(timeout=5000)).lower()
+    except Exception:
+        return False
+    return any(marker in body_text for marker in CHALLENGE_MARKERS)
+
+_last_challenge_alert_ts = 0
+
+def alert_challenge_detected(email_target):
+    # Throttle to at most one alert per 30 minutes so we don't spam the inbox
+    # while every subsequent batch keeps hitting the same wall.
+    global _last_challenge_alert_ts
+    now = time.time()
+    if now - _last_challenge_alert_ts < 1800:
+        return
+    _last_challenge_alert_ts = now
+    try:
+        send_email(
+            email_target,
+            "🛑 Naukri Bot Paused: Human-verification challenge detected",
+            "<html><body style='font-family:Arial,sans-serif;color:#333;'>"
+            "<h2 style='color:#c0392b;'>Bot run stopped early</h2>"
+            "<p>Naukri/Akamai served a bot-verification challenge page "
+            "(\"check the box to let us know you're human\") instead of real "
+            "search results, so the current scan was aborted to avoid wasting "
+            "the run against a wall.</p>"
+            "<p><b>What to do:</b> wait a while before the next run (the block "
+            "is usually temporary/IP or session based), or refresh the session "
+            "by re-running <code>login_setup.py</code> locally and redeploying "
+            "<code>naukri_storage_state.json</code>. Scanning less frequently "
+            "also helps avoid retriggering it.</p>"
+            "</body></html>"
+        )
+    except Exception as e:
+        print(f"   [-] Could not send challenge-alert email: {e}")
+
 def load_config():
     with open(CONFIG_PATH, "r") as f:
         return json.load(f)
@@ -173,7 +223,7 @@ async def wait_for_clarification(question_id, timeout=1800):
     print(f"   [!] No clarification received for '{question_id}' within timeout. Leaving field blank.")
     return ""
 
-async def handle_application_form(page, config, job_title="", comp_name=""):
+async def handle_application_form(page, config, job_title="", comp_name="", jd_text=""):
     # Tracks which questionnaire fields were detected and what value was filled
     # into each, so we can report exactly what was submitted on your behalf.
     filled_fields = {}
@@ -199,7 +249,13 @@ async def handle_application_form(page, config, job_title="", comp_name=""):
                     await inp.fill(value)
                     filled_fields["Notice Period"] = value
                 elif "skill" in label:
-                    value = config["questionnaire_answers"]["skills"][:100]
+                    default_skills = config["questionnaire_answers"]["skills"]
+                    tailored = default_skills
+                    if config.get("ai", {}).get("auto_answer_questions", True):
+                        tailored = ai_helper.tailor_skills_for_jd(
+                            jd_text, fallback_skills=default_skills
+                        )
+                    value = tailored[:100]
                     await inp.fill(value)
                     filled_fields["Skills"] = value
                 elif label.strip():
@@ -282,6 +338,24 @@ def send_application_confirmation_email(email_target, title, company, location, 
     """
     send_email(email_target, f"✅ Applied: {title} @ {company}", html_body)
 
+def send_application_rejected_email(email_target, title, company, location, link, reason=""):
+    """Notifies immediately when a job could NOT be auto-applied to
+    (external redirect, missing Apply button, or an error mid-application),
+    so you know it needs manual attention instead of silently vanishing."""
+    html_body = f"""
+    <html><body style="font-family: Arial, sans-serif; color: #333;">
+        <h2 style="color: #f44336;">🚫 Application Not Submitted</h2>
+        <table style="border-collapse: collapse; width: 100%; max-width: 600px;">
+            <tr><td style="padding:8px;border:1px solid #ddd;"><b>Title</b></td><td style="padding:8px;border:1px solid #ddd;">{title}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd;"><b>Company</b></td><td style="padding:8px;border:1px solid #ddd;">{company}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd;"><b>Location</b></td><td style="padding:8px;border:1px solid #ddd;">{location}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd;"><b>Link</b></td><td style="padding:8px;border:1px solid #ddd;"><a href="{link}">{link}</a></td></tr>
+        </table>
+        <p style="margin-top:15px;background:#fdecea;padding:12px;border-radius:4px;"><b>Reason:</b> {reason}</p>
+    </body></html>
+    """
+    send_email(email_target, f"🚫 Not Applied: {title} @ {company}", html_body)
+
 async def run_auto_apply():
     config = load_config()
     seen_jobs = load_seen_jobs()
@@ -358,6 +432,14 @@ async def run_auto_apply():
                     continue
 
                 await human_delay(4, 6)
+
+                if await is_challenge_page(page):
+                    print(f"   [!] Akamai human-verification challenge detected on search page "
+                          f"({role} in {location}). Aborting this run early.")
+                    alert_challenge_detected(config["email_target"])
+                    await context.close()
+                    await browser.close()
+                    return
 
                 # Naukri's search results wrap each card in a "srp-jobtuple-wrapper"
                 # div (the older "srp-jobtuple" class is no longer used).
@@ -468,6 +550,15 @@ async def run_auto_apply():
                         await job_page.goto(link, timeout=30000)
                         await human_delay(3, 5)
 
+                        if await is_challenge_page(job_page):
+                            print(f"   [!] Akamai human-verification challenge detected on job page "
+                                  f"({job_title} @ {comp_name}). Aborting this run early.")
+                            alert_challenge_detected(config["email_target"])
+                            await job_page.close()
+                            await context.close()
+                            await browser.close()
+                            return
+
                         apply_btn = job_page.locator("button:has-text('Apply')").first
                         if await apply_btn.count() > 0:
                             btn_text = await apply_btn.inner_text()
@@ -475,18 +566,52 @@ async def run_auto_apply():
                                 await apply_btn.click()
                                 print(f"   [+] Processed direct apply submission at: {comp_name}")
                                 await human_delay(2, 4)
-                                filled_fields = await handle_application_form(job_page, config, job_title, comp_name)
+                                filled_fields = await handle_application_form(
+                                    job_page, config, job_title, comp_name, jd_text=job_desc_snippet
+                                )
                                 send_application_confirmation_email(
                                     config["email_target"], job_title, comp_name, location, link, filled_fields, config
                                 )
-                                print(f"   [+] Confirmation email sent for: {job_title} @ {comp_name}")
+                                print(f"   [+] Confirmation email sent (applied): {job_title} @ {comp_name}")
                                 record_stat("applied")
                                 if filled_fields:
                                     for field, value in filled_fields.items():
                                         print(f"       - {field}: {value}")
+                            else:
+                                # Naukri redirects this job to the company's own careers
+                                # site instead of a native in-app Apply flow - the bot
+                                # can't submit it, so notify immediately instead of
+                                # silently dropping it.
+                                print(f"   [-] Rejected (external company-site apply not supported): {job_title} @ {comp_name}")
+                                send_application_rejected_email(
+                                    config["email_target"], job_title, comp_name, location, link,
+                                    reason="This job redirects to the company's own external career site, "
+                                           "which the bot cannot auto-apply to. Please apply manually if interested."
+                                )
+                                record_stat("rejected")
+                        else:
+                            print(f"   [-] Rejected (no Apply button found): {job_title} @ {comp_name}")
+                            send_application_rejected_email(
+                                config["email_target"], job_title, comp_name, location, link,
+                                reason="No Apply button could be found on the job page (listing may be expired, "
+                                       "already applied elsewhere, or the page layout changed)."
+                            )
+                            record_stat("rejected")
                         await job_page.close()
                     except Exception as err:
                         print(f"   [-] Processing issue on unique post: {err}")
+                        try:
+                            send_application_rejected_email(
+                                config["email_target"],
+                                locals().get("job_title", "Unknown Title"),
+                                locals().get("comp_name", "Unknown Company"),
+                                location,
+                                locals().get("link", "N/A"),
+                                reason=f"The bot hit an error while trying to apply: {err}"
+                            )
+                            record_stat("rejected")
+                        except Exception as notify_err:
+                            print(f"   [-] Could not send rejection email either: {notify_err}")
         # Persist any refreshed cookies/tokens back to the portable session file
         # so the next run picks up the latest state.
         await context.storage_state(path=STORAGE_STATE_PATH)

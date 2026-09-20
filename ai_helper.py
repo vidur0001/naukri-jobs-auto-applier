@@ -168,6 +168,53 @@ def answer_question(question, profile=None, job_title="", company=""):
         return None
 
 
+def tailor_skills_for_jd(jd_text, profile=None, fallback_skills=""):
+    """Reorders/rephrases the candidate's REAL skills to emphasize whichever
+    ones the JD actually asks for, using the JD's own terminology where an
+    equivalent genuine skill exists. Never invents a skill the candidate
+    doesn't actually have - this is keyword/ATS alignment, not fabrication.
+    Returns a comma-separated string, or fallback_skills if AI is unavailable."""
+    profile = profile if profile is not None else load_profile()
+    client = _get_client()
+    known_skills = fallback_skills or ", ".join(profile.get("skills", []))
+    if client is None or not jd_text or jd_text.strip() in ("Not available", "") or not known_skills:
+        return fallback_skills
+
+    prompt = (
+        "You are helping a candidate fill the 'Key Skills' field of a job application "
+        "so it matches the job description as closely as possible for ATS/recruiter scanning. "
+        "Rules:\n"
+        "- ONLY use skills from the candidate's REAL skill list below. Never add a skill, "
+        "tool, or technology that isn't in that list, even if the job description asks for it.\n"
+        "- Reorder the candidate's real skills so the ones the job description explicitly "
+        "mentions or implies come first.\n"
+        "- If the job description uses different wording for a skill the candidate already "
+        "has (e.g. JD says 'Amazon Web Services' and candidate has 'AWS'), you may rewrite that "
+        "skill to match the JD's exact wording - but only for skills genuinely already possessed.\n"
+        "- Respond ONLY with compact JSON: {\"skills\": \"comma, separated, list\"}.\n\n"
+        f"CANDIDATE'S REAL SKILLS:\n{known_skills}\n\n"
+        f"JOB DESCRIPTION:\n{jd_text[:3000]}"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=400,
+            reasoning_effort="low",
+            response_format={"type": "json_object"},
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        if not raw:
+            raise ValueError("empty response from model")
+        data = _extract_json_object(raw)
+        skills = str(data.get("skills", "")).strip()
+        return skills if skills else fallback_skills
+    except Exception as e:
+        print(f"[AI] tailor_skills_for_jd failed, using default skills: {e}")
+        return fallback_skills
+
+
 def summarize_jd(jd_text):
     """Returns a short bullet-point summary string (HTML <br/>-separated)."""
     client = _get_client()
