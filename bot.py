@@ -271,8 +271,8 @@ def send_job_decision_email(email_target, job_id, title, company, location, link
                              experience="Not specified", salary="Not disclosed",
                              job_desc="Not available - see full posting via the link below.",
                              ai_score=None, ai_reasoning=None, ai_summary=None):
-    decide_skip = f"{APP_BASE_URL}/decide/{job_id}?action=skip"
-    pause_url = f"{APP_BASE_URL}/auto-apply/pause"
+    decide_skip = f"{APP_BASE_URL}/decide/{job_id}?action=skip&token={CHALLENGE_ACCESS_TOKEN}"
+    pause_url = f"{APP_BASE_URL}/auto-apply/pause?token={CHALLENGE_ACCESS_TOKEN}"
     ai_html = ""
     if ai_score is not None:
         ai_html = f"""
@@ -338,6 +338,7 @@ def send_clarification_email(email_target, question_id, label, job_title, compan
     clarify_url = (
         f"{APP_BASE_URL}/clarify/{question_id}"
         f"?label={quote(label)}&job_title={quote(job_title)}&company={quote(company)}"
+        f"&token={CHALLENGE_ACCESS_TOKEN}"
     )
     html_body = f"""
     <html><body style="font-family: Arial, sans-serif; color: #333;">

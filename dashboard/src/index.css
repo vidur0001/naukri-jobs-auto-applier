@@ -1,0 +1,374 @@
+:root {
+  --bg: #0b0d12;
+  --bg-glow: radial-gradient(1200px 600px at 15% -10%, rgba(99, 102, 241, 0.12), transparent),
+    radial-gradient(1000px 500px at 100% 0%, rgba(34, 197, 148, 0.08), transparent);
+  --panel: #12151c;
+  --panel-hover: #151924;
+  --border: #232734;
+  --text: #eef0f4;
+  --muted: #8b93a7;
+  --accent: #6366f1;
+  --accent-2: #22c594;
+  --green: #22c55e;
+  --orange: #f59e0b;
+  --red: #f43f5e;
+  --blue: #60a5fa;
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg);
+  background-image: var(--bg-glow);
+  color: var(--text);
+}
+
+.app {
+  max-width: 1440px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 28px clamp(16px, 4vw, 48px) 60px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 24px;
+  margin-bottom: 28px;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand-mark {
+  font-size: 30px;
+  line-height: 1;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(34, 197, 148, 0.2));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  color: var(--muted);
+  margin: 2px 0 0;
+  font-size: 13px;
+}
+
+.live-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.live-on {
+  color: var(--green);
+  background: rgba(34, 197, 94, 0.08);
+  border-color: rgba(34, 197, 94, 0.25);
+}
+
+.live-off {
+  color: var(--red);
+  background: rgba(244, 63, 94, 0.08);
+  border-color: rgba(244, 63, 94, 0.25);
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 0 currentColor;
+  animation: pulse 1.8s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(34, 197, 94, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+  }
+}
+
+.app-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+
+.applications-card {
+  grid-column: 1 / -1;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px 24px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.18);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.card:hover {
+  border-color: #2c3140;
+  background: var(--panel-hover);
+}
+
+.app-footer {
+  margin-top: 32px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.card h2 {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  color: var(--red);
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 15px;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-green {
+  background: var(--green);
+}
+.dot-orange {
+  background: var(--orange);
+}
+.dot-gray {
+  background: var(--muted);
+}
+
+.status-meta {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.status-meta p {
+  margin: 6px 0;
+}
+.status-meta b {
+  color: var(--text);
+}
+
+.stats-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+
+.stat-block {
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-value {
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.accent-green {
+  color: var(--green);
+}
+.accent-red {
+  color: var(--red);
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.history-table,
+.applications-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.history-table th,
+.history-table td,
+.applications-table th,
+.applications-table td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.history-table th,
+.history-table td {
+  padding: 10px 8px;
+}
+
+.applications-table td:first-child {
+  white-space: normal;
+  min-width: 160px;
+}
+
+.applications-table tbody tr:hover,
+.history-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.history-table th,
+.applications-table th {
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.applications-table a {
+  color: var(--blue);
+  text-decoration: none;
+}
+.applications-table a:hover {
+  text-decoration: underline;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+/* Only the applications table has long free-text columns (title/company/
+   location) that genuinely need a minimum width; the compact history table
+   should shrink to fit its card instead of forcing a scrollbar. */
+.applications-table {
+  min-width: 480px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.badge-green {
+  background: rgba(76, 175, 80, 0.15);
+  color: var(--green);
+}
+.badge-gray {
+  background: rgba(139, 147, 167, 0.15);
+  color: var(--muted);
+}
+.badge-orange {
+  background: rgba(255, 152, 0, 0.15);
+  color: var(--orange);
+}
+.badge-red {
+  background: rgba(244, 67, 54, 0.15);
+  color: var(--red);
+}
+
+/* Tablet: two-column card grid, single-column for full-width cards handled
+   automatically via applications-card's grid-column span. */
+@media (max-width: 1024px) and (min-width: 641px) {
+  .app-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Mobile: stack everything, shrink paddings/typography, keep topbar tidy. */
+@media (max-width: 640px) {
+  .app {
+    padding: 18px 14px 40px;
+  }
+
+  .app-grid {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .card {
+    padding: 16px 16px;
+  }
+
+  .topbar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    padding-bottom: 16px;
+    margin-bottom: 20px;
+  }
+
+  .stats-grid {
+    gap: 16px;
+  }
+
+  .stat-value {
+    font-size: 22px;
+  }
+}

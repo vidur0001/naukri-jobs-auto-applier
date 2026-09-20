@@ -20,7 +20,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install --with-deps chromium
 
 # Copy script files
-COPY app.py bot.py mailer.py ai_helper.py config.json profile.json /app/
+COPY app.py bot.py mailer.py ai_helper.py login_capture.py config.json profile.json /app/
+
+# Pre-built static dashboard (React/Vite) served by Flask at /dashboard.
+# Build locally with `npm run build` inside dashboard/ before docker build.
+COPY dashboard/dist /app/dashboard/dist
 
 # Port configurations expose for email webhooks (5000) and the noVNC web
 # viewer (6080) used to let a human solve Akamai's verification challenge

@@ -1,0 +1,12 @@
+{$PUBLIC_DOMAIN} {
+	# Caddy auto-provisions/renews a Let's Encrypt HTTPS cert for this domain
+	# (requires ports 80 + 443 open and the domain's A record pointing at
+	# this box's public IP - see DuckDNS setup).
+
+	# On the public domain, send "/" straight to the dashboard instead of the
+	# raw Flask "/" route, which triggers an email notification on every hit.
+	# The IP-based URL (http://13.61.172.107:5000/) is untouched for that.
+	redir / /dashboard permanent
+
+	reverse_proxy naukri-bot:5000
+}

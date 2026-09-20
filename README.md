@@ -36,7 +36,21 @@ AWS EC2 instance inside Docker.
   stealth patches, since Naukri's Akamai WAF blocks headless browsers.
 - **Web-based control panel** — Flask endpoints (`/start`, `/stop`,
   `/auto-apply/pause`, `/auto-apply/resume`) triggered from email links,
-  usable from a phone browser.
+  usable from a phone browser, and locked behind a per-deploy secret token
+  so nobody but you can control the bot.
+- **Live public dashboard** — a React/Vite single-page app (`dashboard/`)
+  served read-only at `/dashboard`, showing bot status, today's stats, and
+  application history, polling the JSON API every few seconds. Safe to make
+  public since it exposes no credentials or control actions.
+- **Remote Naukri login capture** — click "Login to Naukri" on the
+  dashboard to open a live, noVNC-streamed real browser window; log in
+  manually (handles OTP/CAPTCHA naturally), click "Save Session", and the
+  bot picks up the new session automatically. No password ever touches the
+  server.
+- **HTTPS on a free custom domain** — a Caddy reverse-proxy container
+  auto-provisions and renews a Let's Encrypt certificate for a DuckDNS
+  domain, so the dashboard is reachable at a stable `https://` URL from any
+  device.
 - **Daily summary emails** — a nightly digest of jobs found vs. applied.
 - **Always-on cloud hosting** — deployed on an AWS EC2 instance with an
   Elastic IP so the webhook URLs never change, and `restart: unless-stopped`
@@ -46,15 +60,18 @@ AWS EC2 instance inside Docker.
 
 | Component | Purpose |
 |---|---|
-| `app.py` | Flask server: app control (`/start`, `/stop`), auto-apply pause/resume, and decision/clarification webhooks |
+| `app.py` | Flask server: app control (`/start`, `/stop`), auto-apply pause/resume, decision/clarification webhooks, JSON API, dashboard hosting, and token-gated security |
 | `bot.py` | Playwright automation: search, AI scoring, auto-apply, form-filling, emails |
 | `ai_helper.py` | Groq LLM integration: relevance scoring, JD summarization, questionnaire answering |
 | `mailer.py` | SMTP email sending |
-| `login_setup.py` | One-time local script to log in to Naukri and save `naukri_storage_state.json` |
+| `login_setup.py` | One-time **local** script to log in to Naukri and save `naukri_storage_state.json` (run outside Docker) |
+| `login_capture.py` | **Remote** noVNC-driven login capture, spawned by `app.py`'s `/login/start` route |
+| `dashboard/` | React + Vite frontend: live status/stats/applications panels, session/login panel |
+| `Caddyfile` | Reverse proxy config: auto HTTPS for the public DuckDNS domain |
 | `config.json` | Target roles, locations, experience filter, questionnaire answers, blacklist, AI settings |
 | `profile.json` | Structured resume profile used to ground AI scoring/answers |
-| `Dockerfile` | Python + Xvfb + Playwright Chromium image |
-| `docker-compose.yml` | Container definition, env vars, volumes, `APP_BASE_URL` |
+| `Dockerfile` | Python + Xvfb + Playwright Chromium image, with the pre-built dashboard bundled in |
+| `docker-compose.yml` | `naukri-bot` + `caddy` services, env vars, volumes, `APP_BASE_URL` |
 
 ## How it works
 
@@ -84,21 +101,39 @@ AWS EC2 instance inside Docker.
 ## Deployment
 
 Hosted on AWS EC2 (Ubuntu, `eu-north-1`) with:
-- Docker + Docker Compose running the bot as a single service.
+- Docker + Docker Compose running the bot (`naukri-bot`) and a `caddy`
+  reverse-proxy container.
 - An **Elastic IP** attached to the instance so `APP_BASE_URL` (used in all
   email links) stays constant across instance stops/restarts.
-- Security group allowing inbound SSH (22) and the Flask app port (5000).
-- `restart: unless-stopped` policy for automatic recovery.
+- A free **DuckDNS** domain pointed at the Elastic IP, fronted by **Caddy**,
+  which auto-provisions/renews a Let's Encrypt HTTPS certificate — giving a
+  stable `https://<your-subdomain>.duckdns.org` URL that redirects to
+  `/dashboard`.
+- Security group allowing inbound SSH (22), HTTP/HTTPS (80/443), and the
+  Flask app port (5000, for direct IP access/debugging).
+- `restart: unless-stopped` policy on both containers for automatic recovery.
 
 **Instance control:** start/stop the EC2 instance from the AWS Console
 (desktop or mobile app) → EC2 → instance → Start/Stop. As long as the
 Elastic IP stays associated, the public IP and webhook links never change.
 
 **Monitoring:** primarily via email notifications (job found, applied,
-clarification needed). Logs can also be tailed via SSH:
+clarification needed) and the live dashboard. Logs can also be tailed via
+SSH:
 ```
 ssh -i <key>.pem ubuntu@<elastic-ip> "docker logs job_bot-naukri-bot-1 --tail 50"
 ```
+
+### Building/deploying the dashboard
+
+The dashboard is a static build, not served by a dev server in production:
+```bash
+cd dashboard
+npm install
+npm run build          # outputs dashboard/dist, bundled into the Docker image
+```
+Then rebuild and restart the container as usual
+(`docker compose up -d --build naukri-bot`).
 
 ## Configuration (`config.json`)
 
@@ -119,9 +154,14 @@ ssh -i <key>.pem ubuntu@<elastic-ip> "docker logs job_bot-naukri-bot-1 --tail 50
 
 ```bash
 pip install -r requirements.txt
-python login_setup.py        # one-time: log in, save session
-docker compose up -d --build # build and run the bot
+python login_setup.py        # one-time: log in, save session (local, headed browser)
+cd dashboard && npm install && npm run build && cd ..  # build the dashboard once
+docker compose up -d --build # build and run the bot (+ caddy, if PUBLIC_DOMAIN is set)
 ```
+
+Once deployed, you can also capture/refresh the Naukri session remotely via
+the dashboard's "Login to Naukri" button (`login_capture.py` + noVNC),
+without needing local Python/Playwright at all.
 
 ## Security notes
 
@@ -129,3 +169,12 @@ This repo is private because it references personal job-search data. The
 following are git-ignored and must be supplied per-environment, never
 committed: `.env`, `config.json`, `naukri_storage_state.json`, `*.pem` SSH
 keys, `seen_jobs.json`, `decisions/`, and `naukri_profile/`.
+
+All administrative/control routes (`/start`, `/stop`, `/auto-apply/pause`,
+`/auto-apply/resume`, `/decide/<id>`, `/clarify/<id>`, `/edit`,
+`/solve-challenge`, `/login/*`) require a `?token=` query parameter (or
+hidden form field) matching `CHALLENGE_ACCESS_TOKEN` from `.env` — requests
+without it get a `403 Forbidden`. This token is embedded automatically in
+every email action link, so normal usage is unaffected; it only blocks
+unauthorized requests from the public dashboard domain. Read-only endpoints
+(`/dashboard`, `/api/*`) remain public with no token required.

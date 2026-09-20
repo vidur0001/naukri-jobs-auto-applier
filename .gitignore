@@ -24,3 +24,8 @@ stealth_err.txt
 profile.json
 cold_emails_sent.json
 resume.pdf
+login_save.flag
+login_capture.pid
+bot.pid
+human_verified.flag
+auto_apply_paused.flag

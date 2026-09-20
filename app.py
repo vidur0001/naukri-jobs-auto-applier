@@ -5,7 +5,7 @@ import subprocess
 import time
 import threading
 from datetime import datetime, date
-from flask import Flask, request, render_template_string, abort, jsonify
+from flask import Flask, request, render_template_string, abort, jsonify, send_from_directory
 from dotenv import load_dotenv
 from mailer import send_email
 
@@ -27,6 +27,13 @@ AUTO_APPLY_PAUSE_FLAG = os.path.join(BASE_DIR, "auto_apply_paused.flag")
 HUMAN_VERIFIED_FLAG = os.path.join(BASE_DIR, "human_verified.flag")
 APPLICATIONS_LOG_PATH = os.getenv("APPLICATIONS_LOG_PATH", os.path.join(BASE_DIR, "applications_log.json"))
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5000")
+# Portable Naukri session used by bot.py (see login_setup.py / login_capture.py).
+STORAGE_STATE_PATH = os.getenv("STORAGE_STATE_PATH", os.path.join(BASE_DIR, "naukri_storage_state.json"))
+LOGIN_CAPTURE_PID_FILE = os.path.join(BASE_DIR, "login_capture.pid")
+LOGIN_SAVE_FLAG = os.getenv("LOGIN_SAVE_FLAG", os.path.join(BASE_DIR, "login_save.flag"))
+# Pre-built static React dashboard (see dashboard/, `npm run build`), served
+# read-only at /dashboard so the existing "/" email-trigger route is untouched.
+DASHBOARD_DIST_DIR = os.path.join(BASE_DIR, "dashboard", "dist")
 # noVNC/websockify (started by the container's entrypoint alongside Xvfb)
 # serves a live view of the SAME display the bot's browser renders to, so a
 # human can watch and click the "I'm human" checkbox remotely without SSH
@@ -42,7 +49,12 @@ VNC_PASSWORD = os.getenv("VNC_PASSWORD", "changeme")
 CHALLENGE_ACCESS_TOKEN = os.getenv("CHALLENGE_ACCESS_TOKEN") or secrets.token_urlsafe(24)
 
 def _require_challenge_token():
-    if request.args.get("token") != CHALLENGE_ACCESS_TOKEN:
+    # Checks both the query string (GET links from emails) and form body
+    # (POST submissions, e.g. /clarify and /edit, which carry the token via
+    # a hidden field since query strings aren't reliably preserved across
+    # a same-URL form POST in every browser).
+    token = request.args.get("token") or request.form.get("token")
+    if token != CHALLENGE_ACCESS_TOKEN:
         abort(403)
 
 DAILY_STATS_PATH = os.path.join(BASE_DIR, "daily_stats.json")
@@ -90,13 +102,13 @@ EMAIL_HTML_TEMPLATE = """
     </table>
     <br/>
     <div style="margin-top: 15px;">
-        <a href="{{ base_url }}/start" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">▶️ Start Bot</a>
-        <a href="{{ base_url }}/stop" style="background-color: #f44336; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">⏹️ Stop Bot</a>
-        <a href="{{ base_url }}/edit" style="background-color: #2196F3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;">📝 Edit Configuration Details</a>
+        <a href="{{ base_url }}/start?token={{ token }}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">▶️ Start Bot</a>
+        <a href="{{ base_url }}/stop?token={{ token }}" style="background-color: #f44336; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">⏹️ Stop Bot</a>
+        <a href="{{ base_url }}/edit?token={{ token }}" style="background-color: #2196F3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;">📝 Edit Configuration Details</a>
     </div>
     <div style="margin-top: 10px;">
-        <a href="{{ base_url }}/auto-apply/pause" style="background-color: #FF9800; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">⏸️ Pause Auto-Apply</a>
-        <a href="{{ base_url }}/auto-apply/resume" style="background-color: #9C27B0; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;">▶️ Resume Auto-Apply</a>
+        <a href="{{ base_url }}/auto-apply/pause?token={{ token }}" style="background-color: #FF9800; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; margin-right: 10px;">⏸️ Pause Auto-Apply</a>
+        <a href="{{ base_url }}/auto-apply/resume?token={{ token }}" style="background-color: #9C27B0; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;">▶️ Resume Auto-Apply</a>
     </div>
 </body>
 </html>
@@ -149,6 +161,37 @@ def stop_bot():
         os.remove(PID_FILE)
     return True
 
+def is_login_capture_running():
+    if not os.path.exists(LOGIN_CAPTURE_PID_FILE):
+        return False
+    try:
+        with open(LOGIN_CAPTURE_PID_FILE, "r") as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        cmdline_path = f"/proc/{pid}/cmdline"
+        if os.path.exists(cmdline_path):
+            with open(cmdline_path, "rb") as cf:
+                cmdline = cf.read().decode(errors="ignore")
+            if "login_capture.py" not in cmdline:
+                os.remove(LOGIN_CAPTURE_PID_FILE)
+                return False
+        return True
+    except (OSError, ValueError):
+        try:
+            os.remove(LOGIN_CAPTURE_PID_FILE)
+        except OSError:
+            pass
+        return False
+
+def start_login_capture():
+    if is_login_capture_running():
+        return False
+    script_path = os.path.join(BASE_DIR, "login_capture.py")
+    proc = subprocess.Popen(["python", script_path])
+    with open(LOGIN_CAPTURE_PID_FILE, "w") as f:
+        f.write(str(proc.pid))
+    return True
+
 def send_approval_email(config):
     from jinja2 import Template
     html_body = Template(EMAIL_HTML_TEMPLATE).render(
@@ -157,7 +200,8 @@ def send_approval_email(config):
         current_ctc=config["questionnaire_answers"]["current_ctc"],
         expected_ctc=config["questionnaire_answers"]["expected_ctc"],
         skills=config["questionnaire_answers"]["skills"],
-        base_url=APP_BASE_URL
+        base_url=APP_BASE_URL,
+        token=CHALLENGE_ACCESS_TOKEN
     )
     send_email(config["email_target"], "🐳 Naukri Bot is running via Docker - control it here", html_body)
 
@@ -260,15 +304,83 @@ def api_applications():
 
     return jsonify({"count": len(applications), "applications": applications})
 
+@app.route("/api/session-status")
+def api_session_status():
+    # Safe to expose publicly: no session contents, just whether a saved
+    # Naukri session file exists and when it was last (re)written.
+    exists = os.path.exists(STORAGE_STATE_PATH)
+    last_updated = None
+    if exists:
+        last_updated = datetime.fromtimestamp(os.path.getmtime(STORAGE_STATE_PATH)).isoformat()
+    return jsonify({
+        "session_exists": exists,
+        "last_updated": last_updated,
+        "login_capture_running": is_login_capture_running(),
+    })
+
+@app.route("/login/start")
+def login_start():
+    _require_challenge_token()
+    if is_bot_running():
+        return "<h2>Stop the bot first before capturing a new login session (they share the same browser display).</h2>"
+    started = start_login_capture()
+    if not started and not is_login_capture_running():
+        return "<h2>Could not start the login browser. Check container logs.</h2>", 500
+    host = request.host.split(":")[0]
+    novnc_url = (
+        f"http://{host}:{NOVNC_PORT}/vnc.html?autoconnect=true&resize=scale"
+        f"&password={VNC_PASSWORD}"
+    )
+    save_url = f"{APP_BASE_URL}/login/save?token={CHALLENGE_ACCESS_TOKEN}"
+    return render_template_string("""
+        <html><body style="font-family: Arial, sans-serif; color: #333; margin:0;">
+            <div style="padding:12px 16px; background:#e3f2fd; border-bottom:1px solid #90caf9;">
+                <b>🔐 Log in to Naukri below.</b>
+                Use the direct Email + Password fields (not "Login with Google").
+                Once you see your Naukri homepage/profile, click Save Session.
+                Your password is never sent to this server - it only leaves your
+                browser to reach Naukri, same as visiting naukri.com directly.
+                <a href="{{ save_url }}" style="background-color:#4CAF50; color:white; padding:8px 16px;
+                   text-decoration:none; border-radius:4px; font-weight:bold; margin-left:12px;">
+                   ✅ Save Session
+                </a>
+            </div>
+            <iframe src="{{ novnc_url }}" style="width:100%; height:90vh; border:none;"></iframe>
+        </body></html>
+    """, novnc_url=novnc_url, save_url=save_url)
+
+@app.route("/login/save")
+def login_save():
+    _require_challenge_token()
+    with open(LOGIN_SAVE_FLAG, "w") as f:
+        f.write("save")
+    print("[+] Login save requested via webhook. Waiting for login_capture.py to write the session file.")
+    return "<h2>Saving session... this closes the browser in a few seconds. You can close this tab and check the dashboard for confirmation.</h2>"
+
 @app.route("/")
 def index():
+    _require_challenge_token()
     config = load_config()
     send_approval_email(config)
     return "<h3>Email notification sent to vidursharma8035@gmail.com. Monitor active.</h3>"
 
+@app.route("/dashboard")
+@app.route("/dashboard/")
+def dashboard():
+    # Serves the pre-built React SPA (see dashboard/, `npm run build`). Kept
+    # off "/" so it doesn't disturb the existing email-trigger route above.
+    return send_from_directory(DASHBOARD_DIST_DIR, "index.html")
+
+@app.route("/assets/<path:filename>")
+def dashboard_assets(filename):
+    # Vite emits asset references as absolute "/assets/..." paths, so they
+    # must be served from the domain root regardless of the /dashboard route.
+    return send_from_directory(os.path.join(DASHBOARD_DIST_DIR, "assets"), filename)
+
 @app.route("/start")
 @app.route("/approve")
 def approve_and_run():
+    _require_challenge_token()
     started = start_bot()
     if started:
         print("[+] Start webhook received. Bot subprocess launched.")
@@ -277,6 +389,7 @@ def approve_and_run():
 
 @app.route("/stop")
 def stop_and_halt():
+    _require_challenge_token()
     stopped = stop_bot()
     if stopped:
         print("[+] Stop webhook received. Bot subprocess terminated.")
@@ -285,6 +398,7 @@ def stop_and_halt():
 
 @app.route("/auto-apply/pause")
 def pause_auto_apply():
+    _require_challenge_token()
     with open(AUTO_APPLY_PAUSE_FLAG, "w") as f:
         f.write("paused")
     print("[+] Auto-apply paused via webhook.")
@@ -292,6 +406,7 @@ def pause_auto_apply():
 
 @app.route("/auto-apply/resume")
 def resume_auto_apply():
+    _require_challenge_token()
     if os.path.exists(AUTO_APPLY_PAUSE_FLAG):
         os.remove(AUTO_APPLY_PAUSE_FLAG)
     print("[+] Auto-apply resumed via webhook.")
@@ -334,6 +449,7 @@ def solve_challenge_resume():
 
 @app.route("/decide/<job_id>")
 def decide(job_id):
+    _require_challenge_token()
     action = request.args.get("action")
     if action not in ("apply", "skip"):
         return "<h2>Invalid action.</h2>", 400
@@ -350,6 +466,7 @@ def decide(job_id):
 def clarify(question_id):
     # Used when the bot hits a form field it doesn't recognize while applying
     # to a job. It pauses and waits here for you to type in the right answer.
+    _require_challenge_token()
     clarify_file = os.path.join(DECISIONS_DIR, f"clarify_{question_id}.json")
     if request.method == "POST":
         value = request.form.get("value", "").strip()
@@ -366,29 +483,33 @@ def clarify(question_id):
         <p>While applying to <b>{{ job_title }}</b> @ <b>{{ company }}</b>, the bot found a form field it didn't
         recognize: <b>{{ label }}</b></p>
         <form method="POST">
+            <input type="hidden" name="token" value="{{ token }}">
             Your answer: <input type="text" name="value" style="width:300px;"><br><br>
             <input type="submit" value="Send Answer">
         </form>
-    """, label=label, job_title=job_title, company=company)
+    """, label=label, job_title=job_title, company=company, token=CHALLENGE_ACCESS_TOKEN)
 
 @app.route("/edit", methods=["GET", "POST"])
 def edit_config():
+    _require_challenge_token()
     config = load_config()
     if request.method == "POST":
         config["questionnaire_answers"]["expected_ctc"] = request.form.get("expected_ctc")
         config["questionnaire_answers"]["skills"] = request.form.get("skills")
         save_config(config)
         return "<h2>Configuration updated! Close this window and return to your application workflow.</h2>"
-    
+
     # Quick inline form rendering for manual data updating overrides
     return render_template_string("""
         <h3>Edit Form-Filling Criteria</h3>
         <form method="POST">
+            <input type="hidden" name="token" value="{{ token }}">
             Expected CTC: <input type="text" name="expected_ctc" value="{{ ctc }}"><br><br>
             Skills Stack: <textarea name="skills" rows="4" cols="50">{{ skills }}</textarea><br><br>
             <input type="submit" value="Save Changes & Update Batch">
         </form>
-    """, ctc=config["questionnaire_answers"]["expected_ctc"], skills=config["questionnaire_answers"]["skills"])
+    """, ctc=config["questionnaire_answers"]["expected_ctc"], skills=config["questionnaire_answers"]["skills"],
+        token=CHALLENGE_ACCESS_TOKEN)
 
 if __name__ == "__main__":
     # Notify immediately on container startup so you don't have to visit the site manually.
