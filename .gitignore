@@ -21,3 +21,5 @@ check_login_out.txt
 ls_out.txt
 stealth_err.txt
 profile.json
+cold_emails_sent.json
+resume.pdf

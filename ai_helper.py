@@ -215,6 +215,58 @@ def tailor_skills_for_jd(jd_text, profile=None, fallback_skills=""):
         return fallback_skills
 
 
+def compose_cold_email(job_title, company, jd_text="", profile=None):
+    """Drafts a short, genuine-sounding cold outreach email to a recruiter
+    whose contact address was found directly in a job posting. Returns
+    {"subject": str, "body_html": str} grounded strictly in the real
+    profile, or None if AI is unavailable (caller should skip sending
+    rather than fabricate a template with made-up claims)."""
+    profile = profile if profile is not None else load_profile()
+    client = _get_client()
+    if client is None:
+        return None
+
+    name = profile.get("name", "")
+    prompt = (
+        f"Write a short, genuine, human-sounding cold outreach email from a job candidate "
+        f"named {name} to a recruiter/HR contact for the role of '{job_title}' at '{company}'. "
+        "The candidate already submitted a formal application through Naukri.com; this email "
+        "is a polite follow-up to stand out, not a duplicate application. Rules:\n"
+        "- 3-5 short sentences. Plain, conversational, no corporate buzzwords "
+        "(\"passionate\", \"leverage\", \"proven track record\", \"synergy\").\n"
+        "- Mention the exact role and company by name.\n"
+        "- Reference 1-2 REAL, specific highlights from the background below that are most "
+        "relevant to this JD - never invent employers, numbers, or skills not listed.\n"
+        "- End by saying the resume is attached and inviting them to reach out.\n"
+        "- Respond ONLY with compact JSON: {\"subject\": \"<short subject line>\", \"body\": \"<email body, "
+        "use \\n for line breaks, no HTML>\"}.\n\n"
+        f"CANDIDATE BACKGROUND:\n{_profile_summary_text(profile)}\n\n"
+        f"JOB DESCRIPTION (for context, may be partial):\n{(jd_text or '')[:2000]}"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+            max_tokens=500,
+            reasoning_effort="low",
+            response_format={"type": "json_object"},
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        if not raw:
+            raise ValueError("empty response from model")
+        data = _extract_json_object(raw)
+        subject = str(data.get("subject", "")).strip() or f"Application follow-up: {job_title} at {company}"
+        body = str(data.get("body", "")).strip()
+        if not body:
+            return None
+        body_html = body.replace("\n", "<br/>")
+        return {"subject": subject, "body_html": body_html}
+    except Exception as e:
+        print(f"[AI] compose_cold_email failed: {e}")
+        return None
+
+
 def summarize_jd(jd_text):
     """Returns a short bullet-point summary string (HTML <br/>-separated)."""
     client = _get_client()

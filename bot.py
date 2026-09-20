@@ -1,5 +1,6 @@
 import asyncio
 import random
+import re
 import os
 import json
 import time
@@ -21,6 +22,10 @@ STORAGE_STATE_PATH = os.getenv("STORAGE_STATE_PATH", os.path.join(BASE_DIR, "nau
 CONFIG_PATH = os.getenv("CONFIG_PATH", os.path.join(BASE_DIR, "config.json"))
 DECISIONS_DIR = os.getenv("DECISIONS_DIR", os.path.join(BASE_DIR, "decisions"))
 SEEN_JOBS_PATH = os.getenv("SEEN_JOBS_PATH", os.path.join(BASE_DIR, "seen_jobs.json"))
+# Tracks which companies a cold outreach email has already been sent to, so
+# a recruiter contact repeated across multiple job postings only gets one
+# follow-up email instead of one per posting.
+COLD_EMAIL_LOG_PATH = os.getenv("COLD_EMAIL_LOG_PATH", os.path.join(BASE_DIR, "cold_emails_sent.json"))
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5000")
 DECISION_POLL_INTERVAL = 3      # seconds between checks for your response
 SKIP_GRACE_PERIOD = 45          # seconds to allow a "Skip" click before auto-applying
@@ -129,6 +134,80 @@ def mark_job_seen(seen_jobs, link, decision):
     seen_jobs[link] = decision
     with open(SEEN_JOBS_PATH, "w") as f:
         json.dump(seen_jobs, f, indent=2)
+
+# Matches a recruiter/HR contact email if the job posting itself explicitly
+# lists one (common on "walk-in"/consultancy-style postings). Naukri does not
+# expose recruiter emails otherwise, so this only fires opportunistically.
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Generic Naukri/noreply addresses that occasionally leak into JD boilerplate
+# footers and should never be treated as a real recruiter contact.
+_EMAIL_IGNORE_DOMAINS = ("naukri.com", "example.com", "noreply", "no-reply")
+
+def extract_contact_email(jd_text):
+    if not jd_text:
+        return None
+    for candidate in _EMAIL_RE.findall(jd_text):
+        if not any(bad in candidate.lower() for bad in _EMAIL_IGNORE_DOMAINS):
+            return candidate
+    return None
+
+def load_cold_email_log():
+    if os.path.exists(COLD_EMAIL_LOG_PATH):
+        try:
+            with open(COLD_EMAIL_LOG_PATH, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+def mark_cold_email_sent(log, company):
+    log[company.strip().lower()] = int(time.time())
+    with open(COLD_EMAIL_LOG_PATH, "w") as f:
+        json.dump(log, f, indent=2)
+
+def send_cold_email_if_possible(job_title, comp_name, jd_text, config, cold_log):
+    """Opportunistically sends a personalized cold-outreach follow-up
+    directly to a recruiter contact email found in the job description
+    (only when the JD itself lists one - the bot never guesses/fabricates
+    an address). No-ops entirely if disabled in config, no contact email is
+    present, the company was already emailed before, or AI is unavailable."""
+    cold_cfg = config.get("cold_email", {})
+    if not cold_cfg.get("enabled", False):
+        return
+    if comp_name.strip().lower() in cold_log:
+        return
+    contact_email = extract_contact_email(jd_text)
+    if not contact_email:
+        return
+    draft = ai_helper.compose_cold_email(job_title, comp_name, jd_text=jd_text)
+    if not draft:
+        return
+    resume_path = cold_cfg.get("resume_path")
+    if resume_path and not os.path.isabs(resume_path):
+        resume_path = os.path.join(BASE_DIR, resume_path)
+    sent = send_email(
+        contact_email,
+        draft["subject"],
+        f"<html><body style='font-family:Arial,sans-serif;color:#333;'>{draft['body_html']}</body></html>",
+        reply_to=cold_cfg.get("reply_to") or config.get("email_target"),
+        attachment_path=resume_path,
+    )
+    mark_cold_email_sent(cold_log, comp_name)
+    if sent:
+        print(f"   [+] Cold outreach email sent to {contact_email} for {job_title} @ {comp_name}")
+        try:
+            send_email(
+                config["email_target"],
+                f"📧 Cold email sent: {job_title} @ {comp_name}",
+                "<html><body style='font-family:Arial,sans-serif;color:#333;'>"
+                f"<p>A follow-up outreach email was auto-sent to <b>{contact_email}</b> "
+                f"(found in the job posting for {job_title} @ {comp_name}) using the draft below.</p>"
+                f"<p><b>Subject:</b> {draft['subject']}</p>"
+                f"<p>{draft['body_html']}</p>"
+                "</body></html>"
+            )
+        except Exception as e:
+            print(f"   [-] Could not send cold-email notification: {e}")
 
 DAILY_STATS_PATH = os.path.join(BASE_DIR, "daily_stats.json")
 
@@ -439,6 +518,8 @@ async def run_auto_apply():
 
         print("[+] Token storage authenticated. Launching systematic sequence processing...")
 
+        cold_log = load_cold_email_log()
+
         for location in config["filters"]["locations"]:
             for role in config["target_roles"]:
                 print(f"\n⚡ BATCH: Scanning for {role} vacancies inside {location.upper()}...")
@@ -617,6 +698,7 @@ async def run_auto_apply():
                                 )
                                 print(f"   [+] Confirmation email sent (applied): {job_title} @ {comp_name}")
                                 record_stat("applied")
+                                send_cold_email_if_possible(job_title, comp_name, job_desc_snippet, config, cold_log)
                                 if filled_fields:
                                     for field, value in filled_fields.items():
                                         print(f"       - {field}: {value}")
