@@ -5,7 +5,7 @@ import subprocess
 import time
 import threading
 from datetime import datetime, date
-from flask import Flask, request, render_template_string, abort
+from flask import Flask, request, render_template_string, abort, jsonify
 from dotenv import load_dotenv
 from mailer import send_email
 
@@ -25,6 +25,7 @@ AUTO_APPLY_PAUSE_FLAG = os.path.join(BASE_DIR, "auto_apply_paused.flag")
 # human-verification challenge, waiting for a person to click through it via
 # the noVNC viewer this app serves at /solve-challenge.
 HUMAN_VERIFIED_FLAG = os.path.join(BASE_DIR, "human_verified.flag")
+SEEN_JOBS_PATH = os.getenv("SEEN_JOBS_PATH", os.path.join(BASE_DIR, "seen_jobs.json"))
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5000")
 # noVNC/websockify (started by the container's entrypoint alongside Xvfb)
 # serves a live view of the SAME display the bot's browser renders to, so a
@@ -201,6 +202,58 @@ def daily_summary_scheduler():
             except Exception as e:
                 print(f"[-] Failed to send daily summary email: {e}")
         time.sleep(30)
+
+# --- Read-only JSON API for the future web dashboard ---------------------
+# Additive only: does not change any existing HTML webhook route/behavior.
+# CORS is wide-open (GET, read-only, no secrets in the payloads) since this
+# is just for a personal dashboard fetching public-to-you status/stats.
+@app.after_request
+def _add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+@app.route("/api/status")
+def api_status():
+    config = load_config()
+    return jsonify({
+        "bot_running": is_bot_running(),
+        "auto_apply_paused": os.path.exists(AUTO_APPLY_PAUSE_FLAG),
+        "target_roles": config.get("target_roles", []),
+        "locations": config.get("filters", {}).get("locations", []),
+    })
+
+@app.route("/api/pause-state")
+def api_pause_state():
+    return jsonify({"auto_apply_paused": os.path.exists(AUTO_APPLY_PAUSE_FLAG)})
+
+@app.route("/api/stats")
+def api_stats():
+    try:
+        with open(DAILY_STATS_PATH, "r") as f:
+            stats = json.load(f)
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        stats = {}
+    today = date.today().isoformat()
+    return jsonify({
+        "today": today,
+        "today_stats": stats.get(today, {"found": 0, "applied": 0}),
+        "history": stats,
+    })
+
+@app.route("/api/applications")
+def api_applications():
+    try:
+        with open(SEEN_JOBS_PATH, "r") as f:
+            seen_jobs = json.load(f)
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        seen_jobs = {}
+    applications = [
+        {"link": link, "decision": decision}
+        for link, decision in seen_jobs.items()
+    ]
+    return jsonify({"count": len(applications), "applications": applications})
 
 @app.route("/")
 def index():
