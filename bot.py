@@ -209,6 +209,38 @@ def send_cold_email_if_possible(job_title, comp_name, jd_text, config, cold_log)
         except Exception as e:
             print(f"   [-] Could not send cold-email notification: {e}")
 
+# Structured, per-job log (title/company/location/link/status/timestamp) for
+# the future web dashboard's "Applications" view. daily_stats.json only has
+# aggregate counts and seen_jobs.json only has link->decision, neither is
+# enough to render a readable table, so this is additive and separate.
+APPLICATIONS_LOG_PATH = os.getenv("APPLICATIONS_LOG_PATH", os.path.join(BASE_DIR, "applications_log.json"))
+APPLICATIONS_LOG_MAX_ENTRIES = 1000
+
+def log_application_event(job_title, comp_name, location, link, status, note=""):
+    try:
+        if os.path.exists(APPLICATIONS_LOG_PATH):
+            with open(APPLICATIONS_LOG_PATH, "r") as f:
+                entries = json.load(f)
+        else:
+            entries = []
+    except (json.JSONDecodeError, OSError):
+        entries = []
+
+    entries.append({
+        "timestamp": int(time.time()),
+        "title": job_title,
+        "company": comp_name,
+        "location": location,
+        "link": link,
+        "status": status,  # e.g. ai_skip, skipped_by_user, applied, rejected_external_site, rejected_no_apply_button, error
+        "note": note,
+    })
+    # Keep the file bounded so it doesn't grow unbounded over months of runs.
+    entries = entries[-APPLICATIONS_LOG_MAX_ENTRIES:]
+
+    with open(APPLICATIONS_LOG_PATH, "w") as f:
+        json.dump(entries, f, indent=2)
+
 DAILY_STATS_PATH = os.path.join(BASE_DIR, "daily_stats.json")
 
 def _today_key():
@@ -648,6 +680,7 @@ async def run_auto_apply():
                         if ai_result["score"] < min_score:
                             print(f"   [AI] Skipping (score {ai_result['score']} < {min_score}): {job_title} @ {comp_name} - {ai_result['reasoning']}")
                             mark_job_seen(seen_jobs, link, "ai_skip")
+                            log_application_event(job_title, comp_name, location, link, "ai_skip", note=ai_result["reasoning"])
                             continue
 
                         # Auto-apply by default, but give a short grace period
@@ -667,6 +700,7 @@ async def run_auto_apply():
 
                         if decision != "apply":
                             print(f"   [-] Skipped by user: {job_title} @ {comp_name}")
+                            log_application_event(job_title, comp_name, location, link, "skipped_by_user")
                             continue
                         print(f"   [+] Grace period elapsed, auto-applying: {job_title} @ {comp_name}")
 
@@ -698,6 +732,7 @@ async def run_auto_apply():
                                 )
                                 print(f"   [+] Confirmation email sent (applied): {job_title} @ {comp_name}")
                                 record_stat("applied")
+                                log_application_event(job_title, comp_name, location, link, "applied")
                                 send_cold_email_if_possible(job_title, comp_name, job_desc_snippet, config, cold_log)
                                 if filled_fields:
                                     for field, value in filled_fields.items():
@@ -714,6 +749,7 @@ async def run_auto_apply():
                                            "which the bot cannot auto-apply to. Please apply manually if interested."
                                 )
                                 record_stat("rejected")
+                                log_application_event(job_title, comp_name, location, link, "rejected_external_site")
                         else:
                             print(f"   [-] Rejected (no Apply button found): {job_title} @ {comp_name}")
                             send_application_rejected_email(
@@ -722,6 +758,7 @@ async def run_auto_apply():
                                        "already applied elsewhere, or the page layout changed)."
                             )
                             record_stat("rejected")
+                            log_application_event(job_title, comp_name, location, link, "rejected_no_apply_button")
                         await job_page.close()
                     except Exception as err:
                         print(f"   [-] Processing issue on unique post: {err}")
@@ -735,6 +772,14 @@ async def run_auto_apply():
                                 reason=f"The bot hit an error while trying to apply: {err}"
                             )
                             record_stat("rejected")
+                            log_application_event(
+                                locals().get("job_title", "Unknown Title"),
+                                locals().get("comp_name", "Unknown Company"),
+                                location,
+                                locals().get("link", "N/A"),
+                                "error",
+                                note=str(err),
+                            )
                         except Exception as notify_err:
                             print(f"   [-] Could not send rejection email either: {notify_err}")
         # Persist any refreshed cookies/tokens back to the portable session file

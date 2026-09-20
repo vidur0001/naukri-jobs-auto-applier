@@ -12,6 +12,7 @@ services:
       - ./decisions:/app/decisions
       - ./seen_jobs.json:/app/seen_jobs.json
       - ./daily_stats.json:/app/daily_stats.json
+      - ./applications_log.json:/app/applications_log.json
     env_file:
       - .env
     environment:

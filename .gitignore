@@ -15,6 +15,7 @@ proof_out.txt
 *_tmp.db
 *_out.txt
 daily_stats.json
+applications_log.json
 debug_page.py
 export_storage_state.py
 check_login_out.txt

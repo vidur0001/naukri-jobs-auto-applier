@@ -25,7 +25,7 @@ AUTO_APPLY_PAUSE_FLAG = os.path.join(BASE_DIR, "auto_apply_paused.flag")
 # human-verification challenge, waiting for a person to click through it via
 # the noVNC viewer this app serves at /solve-challenge.
 HUMAN_VERIFIED_FLAG = os.path.join(BASE_DIR, "human_verified.flag")
-SEEN_JOBS_PATH = os.getenv("SEEN_JOBS_PATH", os.path.join(BASE_DIR, "seen_jobs.json"))
+APPLICATIONS_LOG_PATH = os.getenv("APPLICATIONS_LOG_PATH", os.path.join(BASE_DIR, "applications_log.json"))
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5000")
 # noVNC/websockify (started by the container's entrypoint alongside Xvfb)
 # serves a live view of the SAME display the bot's browser renders to, so a
@@ -244,15 +244,20 @@ def api_stats():
 
 @app.route("/api/applications")
 def api_applications():
+    # Structured per-job log (title/company/location/status/timestamp),
+    # written by bot.py's log_application_event(). Newest first, optionally
+    # limited via ?limit=N (default: all).
     try:
-        with open(SEEN_JOBS_PATH, "r") as f:
-            seen_jobs = json.load(f)
+        with open(APPLICATIONS_LOG_PATH, "r") as f:
+            applications = json.load(f)
     except (json.JSONDecodeError, OSError, FileNotFoundError):
-        seen_jobs = {}
-    applications = [
-        {"link": link, "decision": decision}
-        for link, decision in seen_jobs.items()
-    ]
+        applications = []
+
+    applications = list(reversed(applications))
+    limit = request.args.get("limit", type=int)
+    if limit:
+        applications = applications[:limit]
+
     return jsonify({"count": len(applications), "applications": applications})
 
 @app.route("/")
