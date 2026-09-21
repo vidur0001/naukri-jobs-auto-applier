@@ -61,7 +61,7 @@ DAILY_STATS_PATH = os.path.join(BASE_DIR, "daily_stats.json")
 DEFAULT_PROFILE = {
     "target_roles": ["Software Engineer", "Associate Software Engineer", "Backend Developer", "SRE Engineer", "DevOps Engineer"],
     "filters": {
-        "experience_years": "0",
+        "experience_years": "1",
         "locations": ["bangalore", "pune", "hyderabad", "mumbai", "gurgaon", "noida", "delhi", "chandigarh", "chennai"]
     },
     "questionnaire_answers": {
@@ -91,7 +91,7 @@ def save_config(data):
 EMAIL_HTML_TEMPLATE = """
 <html>
 <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
-    <h2 style="color: #4CAF50;">📋 Naukri Auto-Apply Monitoring Check</h2>
+    <h2 style="color: #4CAF50;">Naukri Auto-Apply Monitoring Check</h2>
     <p>Hello Vidur, your monitoring system is prepared to run automatic applications with the following criteria:</p>
     <table style="border-collapse: collapse; width: 100%; max-width: 600px;">
         <tr style="background-color: #f2f2f2;"><th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Detail Name</th><th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Value</th></tr>
@@ -356,6 +356,40 @@ def login_save():
         f.write("save")
     print("[+] Login save requested via webhook. Waiting for login_capture.py to write the session file.")
     return "<h2>Saving session... this closes the browser in a few seconds. You can close this tab and check the dashboard for confirmation.</h2>"
+
+@app.route("/session/upload", methods=["GET", "POST"])
+def session_upload():
+    _require_challenge_token()
+    if request.method == "GET":
+        return render_template_string("""
+            <html><body style="font-family: Arial, sans-serif; color: #333; max-width:600px; margin:40px auto;">
+                <h2>⬆️ Upload Refreshed Naukri Session</h2>
+                <p>Run <code>python login_setup.py</code> on your own laptop, log in normally,
+                   then select the <code>naukri_storage_state.json</code> it creates below.</p>
+                <form method="POST" enctype="multipart/form-data">
+                    <input type="hidden" name="token" value="{{ token }}">
+                    <input type="file" name="session_file" accept="application/json" required>
+                    <br/><br/>
+                    <button type="submit" style="background-color:#4CAF50; color:white; padding:10px 20px;
+                        border:none; border-radius:4px; font-weight:bold; cursor:pointer;">Upload</button>
+                </form>
+            </body></html>
+        """, token=CHALLENGE_ACCESS_TOKEN)
+
+    uploaded = request.files.get("session_file")
+    if not uploaded or not uploaded.filename:
+        return "<h2>No file selected. Go back and choose naukri_storage_state.json.</h2>", 400
+    try:
+        content = uploaded.read()
+        data = json.loads(content)  # validate it's actually JSON before overwriting the live session
+        if not isinstance(data, dict) or "cookies" not in data:
+            return "<h2>That doesn't look like a valid Playwright storage_state.json file.</h2>", 400
+        with open(STORAGE_STATE_PATH, "wb") as f:
+            f.write(content)
+    except (json.JSONDecodeError, OSError) as e:
+        return f"<h2>Could not save session file: {e}</h2>", 400
+    print("[+] Naukri session refreshed via /session/upload.")
+    return "<h2>✅ Session uploaded successfully. You can start the bot again now.</h2>"
 
 @app.route("/")
 def index():

@@ -63,6 +63,41 @@ async def is_challenge_page(page):
         return False
     return any(marker in body_text for marker in CHALLENGE_MARKERS)
 
+def alert_session_expired(email_target):
+    """Notifies that the saved Naukri session is invalid/expired and the bot
+    has stopped. Since re-logging in from this cloud server tends to trigger
+    repeated Akamai puzzles, the fix is to refresh the session from a home/
+    personal network via login_setup.py, then upload the resulting file here
+    - no manual scp needed."""
+    upload_url = f"{APP_BASE_URL}/session/upload?token={CHALLENGE_ACCESS_TOKEN}"
+    try:
+        send_email(
+            email_target,
+            "🛑 Naukri Bot Stopped: Session expired",
+            "<html><body style='font-family:Arial,sans-serif;color:#333;'>"
+            "<h2 style='color:#c0392b;'>Bot stopped - login session expired</h2>"
+            "<p>The saved Naukri session is no longer valid, so the bot could "
+            "not continue. To avoid repeated Akamai puzzle loops, please "
+            "refresh the session from your own computer instead of this "
+            "server:</p>"
+            "<ol>"
+            "<li>On your laptop, run <code>python login_setup.py</code> and "
+            "log in to Naukri normally.</li>"
+            "<li>This creates/updates <code>naukri_storage_state.json</code> "
+            "in that folder.</li>"
+            "<li>Click the button below and upload that file - no terminal/"
+            "scp needed.</li>"
+            "</ol>"
+            f"<p><a href='{upload_url}' style='background-color:#4CAF50;"
+            "color:white;padding:10px 20px;text-decoration:none;border-radius:4px;"
+            "font-weight:bold;'>⬆️ Upload Refreshed Session</a></p>"
+            "<p style='color:#888;'>Once uploaded, just start the bot again "
+            "from your usual control email/dashboard.</p>"
+            "</body></html>"
+        )
+    except Exception as e:
+        print(f"   [-] Could not send session-expired alert email: {e}")
+
 _last_challenge_alert_ts = 0
 
 def alert_challenge_detected(email_target):
@@ -519,6 +554,7 @@ async def run_auto_apply():
         )
         if not os.path.exists(STORAGE_STATE_PATH):
             print(f"[X] Execution Halted: No session found at {STORAGE_STATE_PATH}. Please run login_setup.py locally.")
+            alert_session_expired(config["email_target"])
             await browser.close()
             return
         context = await browser.new_context(
@@ -545,6 +581,7 @@ async def run_auto_apply():
 
         if "login" in page.url.lower():
             print("[X] Execution Halted: The saved session has expired. Please run login_setup.py locally.")
+            alert_session_expired(config["email_target"])
             await context.close()
             await browser.close()
             return
