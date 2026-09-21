@@ -70,6 +70,7 @@ def alert_session_expired(email_target):
     personal network via login_setup.py, then upload the resulting file here
     - no manual scp needed."""
     upload_url = f"{APP_BASE_URL}/session/upload?token={CHALLENGE_ACCESS_TOKEN}"
+    login_url = f"{APP_BASE_URL}/login/start?token={CHALLENGE_ACCESS_TOKEN}"
     try:
         send_email(
             email_target,
@@ -91,6 +92,11 @@ def alert_session_expired(email_target):
             f"<p><a href='{upload_url}' style='background-color:#4CAF50;"
             "color:white;padding:10px 20px;text-decoration:none;border-radius:4px;"
             "font-weight:bold;'>⬆️ Upload Refreshed Session</a></p>"
+            "<p style='color:#888;margin-top:18px;'>Only have your phone? You can log in "
+            "directly from here instead - no laptop needed:</p>"
+            f"<p><a href='{login_url}' style='background-color:#2196F3;"
+            "color:white;padding:10px 20px;text-decoration:none;border-radius:4px;"
+            "font-weight:bold;'>📱 Login to Naukri (phone-friendly)</a></p>"
             "<p style='color:#888;'>Once uploaded, just start the bot again "
             "from your usual control email/dashboard.</p>"
             "</body></html>"
@@ -114,6 +120,7 @@ def alert_challenge_detected(email_target):
     # locally-refreshed session (same flow as alert_session_expired) - that
     # consistently clears the challenge without ever solving it from here.
     upload_url = f"{APP_BASE_URL}/session/upload?token={CHALLENGE_ACCESS_TOKEN}"
+    login_url = f"{APP_BASE_URL}/login/start?token={CHALLENGE_ACCESS_TOKEN}"
     try:
         send_email(
             email_target,
@@ -135,6 +142,11 @@ def alert_challenge_detected(email_target):
             f"<p><a href='{upload_url}' style='background-color:#4CAF50;"
             "color:white;padding:10px 20px;text-decoration:none;border-radius:4px;"
             "font-weight:bold;'>⬆️ Upload Refreshed Session</a></p>"
+            "<p style='color:#888;margin-top:18px;'>Only have your phone? You can log in "
+            "directly from here instead - no laptop needed:</p>"
+            f"<p><a href='{login_url}' style='background-color:#2196F3;"
+            "color:white;padding:10px 20px;text-decoration:none;border-radius:4px;"
+            "font-weight:bold;'>📱 Login to Naukri (phone-friendly)</a></p>"
             "<p style='color:#888;'>Once uploaded, start the bot again from "
             "your usual control email/dashboard.</p>"
             "</body></html>"
