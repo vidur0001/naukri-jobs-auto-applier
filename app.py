@@ -20,6 +20,24 @@ DECISIONS_DIR = os.getenv("DECISIONS_DIR", os.path.join(BASE_DIR, "decisions"))
 os.makedirs(DECISIONS_DIR, exist_ok=True)
 PID_FILE = os.path.join(BASE_DIR, "bot.pid")
 AUTO_APPLY_PAUSE_FLAG = os.path.join(BASE_DIR, "auto_apply_paused.flag")
+# Set by /stop, cleared by /start (or /approve). While present, the
+# auto-restart scheduler leaves the bot off - it only kicks back in once you
+# deliberately start it again, so "Stop Bot" from the email still works as
+# an actual off switch.
+BOT_AUTO_DISABLED_FLAG = os.path.join(BASE_DIR, "bot_auto_disabled.flag")
+# Tracks when the bot subprocess was last launched and how long its last
+# run took, so auto_restart_scheduler() can relaunch it automatically once a
+# scan finishes (bot.py exits after one full pass) instead of sitting idle
+# until someone clicks "Start Bot" by hand.
+AUTO_RESTART_STATE_PATH = os.path.join(BASE_DIR, "auto_restart_state.json")
+# Gap before relaunching after a normal, full-length run.
+RESTART_INTERVAL_MINUTES = int(os.getenv("RESTART_INTERVAL_MINUTES", "30"))
+# Gap before relaunching after a run that ended almost immediately (expired
+# session / Akamai challenge - bot.py already emails you when that happens).
+# Longer, so it doesn't hammer Naukri or your inbox while waiting for you to
+# upload a refreshed session.
+FAILURE_BACKOFF_MINUTES = int(os.getenv("FAILURE_BACKOFF_MINUTES", "120"))
+QUICK_FAIL_SECONDS = 180
 # Written by this Flask process when the "I've solved it, resume" button is
 # clicked; bot.py polls for this file while it's paused on an Akamai
 # human-verification challenge, waiting for a person to click through it via
@@ -139,16 +157,50 @@ def is_bot_running():
             pass
         return False
 
+def _load_restart_state():
+    try:
+        with open(AUTO_RESTART_STATE_PATH, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        return {}
+
+def _save_restart_state(state):
+    try:
+        with open(AUTO_RESTART_STATE_PATH, "w") as f:
+            json.dump(state, f)
+    except OSError:
+        pass
+
 def start_bot():
     if is_bot_running():
         return False
+    # A deliberate start (button/email link) always re-enables auto-restart,
+    # even if the bot had previously been stopped manually.
+    if os.path.exists(BOT_AUTO_DISABLED_FLAG):
+        os.remove(BOT_AUTO_DISABLED_FLAG)
     bot_path = os.path.join(BASE_DIR, "bot.py")
     proc = subprocess.Popen(["python", bot_path])
     with open(PID_FILE, "w") as f:
         f.write(str(proc.pid))
+    start_time = time.time()
+    state = _load_restart_state()
+    state["last_start"] = start_time
+    state["last_run_seconds"] = None
+    _save_restart_state(state)
+
+    def _wait_and_record():
+        proc.wait()
+        s = _load_restart_state()
+        s["last_run_seconds"] = time.time() - start_time
+        _save_restart_state(s)
+    threading.Thread(target=_wait_and_record, daemon=True).start()
     return True
 
 def stop_bot():
+    # Stopping is always a deliberate action - disable auto-restart until the
+    # bot is started again explicitly.
+    with open(BOT_AUTO_DISABLED_FLAG, "w") as f:
+        f.write("disabled")
     if not os.path.exists(PID_FILE):
         return False
     try:
@@ -246,6 +298,46 @@ def daily_summary_scheduler():
             except Exception as e:
                 print(f"[-] Failed to send daily summary email: {e}")
         time.sleep(30)
+
+def auto_restart_scheduler():
+    """Keeps the bot effectively running 24/7 without any manual clicking.
+
+    bot.py does one full pass over every role/location/experience
+    combination and then exits - there's no built-in loop. This background
+    thread relaunches it automatically once it finishes, so the only gaps
+    are short, deliberate cooldowns:
+      - RESTART_INTERVAL_MINUTES after a normal full run.
+      - FAILURE_BACKOFF_MINUTES after a run that ended almost immediately
+        (expired session / Akamai challenge - bot.py already emails you
+        about those cases), so it doesn't hammer Naukri or your inbox while
+        waiting for a refreshed session upload.
+    Stops entirely while BOT_AUTO_DISABLED_FLAG exists, i.e. after you click
+    "Stop Bot" - it only resumes once you click "Start Bot" again.
+    """
+    while True:
+        time.sleep(60)
+        try:
+            if is_bot_running() or os.path.exists(BOT_AUTO_DISABLED_FLAG):
+                continue
+            state = _load_restart_state()
+            last_start = state.get("last_start")
+            if last_start is None:
+                start_bot()
+                continue
+            last_duration = state.get("last_run_seconds")
+            if last_duration is None:
+                # Previous run hasn't been recorded as finished yet (or the
+                # process/container restarted mid-run) - leave it alone.
+                continue
+            gap_minutes = (
+                FAILURE_BACKOFF_MINUTES if last_duration < QUICK_FAIL_SECONDS
+                else RESTART_INTERVAL_MINUTES
+            )
+            if time.time() - last_start >= gap_minutes * 60:
+                print("[+] auto_restart_scheduler: relaunching bot for the next scan.")
+                start_bot()
+        except Exception as e:
+            print(f"[-] auto_restart_scheduler error: {e}")
 
 # --- Read-only JSON API for the future web dashboard ---------------------
 # Additive only: does not change any existing HTML webhook route/behavior.
@@ -550,4 +642,5 @@ if __name__ == "__main__":
     # Sent in a background thread so a slow/unreachable SMTP server never delays Flask binding to the port.
     threading.Thread(target=send_approval_email, args=(load_config(),), daemon=True).start()
     threading.Thread(target=daily_summary_scheduler, daemon=True).start()
+    threading.Thread(target=auto_restart_scheduler, daemon=True).start()
     app.run(host="0.0.0.0", port=5000)
