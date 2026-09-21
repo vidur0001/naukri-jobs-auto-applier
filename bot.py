@@ -102,32 +102,41 @@ _last_challenge_alert_ts = 0
 
 def alert_challenge_detected(email_target):
     # Throttle to at most one alert per 10 minutes so we don't spam the inbox
-    # while the bot is actively waiting on this same challenge to be solved.
+    # while repeated runs keep hitting the same block.
     global _last_challenge_alert_ts
     now = time.time()
     if now - _last_challenge_alert_ts < 600:
         return
     _last_challenge_alert_ts = now
+    # Solving Akamai's puzzle live via noVNC from a phone is unreliable (touch
+    # telemetry + cloud IP keep re-triggering it), so instead of waiting for a
+    # puzzle-solve, the bot aborts this run immediately and asks for a
+    # locally-refreshed session (same flow as alert_session_expired) - that
+    # consistently clears the challenge without ever solving it from here.
+    upload_url = f"{APP_BASE_URL}/session/upload?token={CHALLENGE_ACCESS_TOKEN}"
     try:
         send_email(
             email_target,
-            "🛑 Naukri Bot Paused: Human-verification challenge detected",
+            "🛑 Naukri Bot Stopped: Verification challenge detected",
             "<html><body style='font-family:Arial,sans-serif;color:#333;'>"
-            "<h2 style='color:#c0392b;'>Bot is waiting for you</h2>"
-            "<p>Naukri/Akamai served a bot-verification challenge page "
-            "(\"check the box to let us know you're human\") instead of real "
-            "search results. The bot has paused its browser exactly where it "
-            "hit the wall and is waiting for you to clear it.</p>"
-            "<p>Click the button below to open a live view of the bot's browser "
-            "in your own browser tab, click the verification checkbox yourself, "
-            "then click the \"resume\" button shown there. No local setup or "
-            "scripts needed.</p>"
-            f"<p><a href='{APP_BASE_URL}/solve-challenge?token={CHALLENGE_ACCESS_TOKEN}' style='background-color:#4CAF50;"
+            "<h2 style='color:#c0392b;'>Bot stopped - verification challenge blocked it</h2>"
+            "<p>Naukri/Akamai served a bot-verification challenge page instead "
+            "of real results, so the run was stopped. Solving this puzzle "
+            "remotely (e.g. from a phone) tends to just trigger it again, so "
+            "the reliable fix is to refresh the session from your own "
+            "computer instead:</p>"
+            "<ol>"
+            "<li>On your laptop, run <code>python login_setup.py</code> and "
+            "log in to Naukri normally.</li>"
+            "<li>This creates/updates <code>naukri_storage_state.json</code> "
+            "in that folder.</li>"
+            "<li>Click the button below and upload that file.</li>"
+            "</ol>"
+            f"<p><a href='{upload_url}' style='background-color:#4CAF50;"
             "color:white;padding:10px 20px;text-decoration:none;border-radius:4px;"
-            "font-weight:bold;'>🧑\u200d💻 Do Human Verification Challenge</a></p>"
-            "<p style='color:#888;'>If you don't respond within 20 minutes, this "
-            "run will time out and stop automatically; the next scheduled run "
-            "will try again.</p>"
+            "font-weight:bold;'>⬆️ Upload Refreshed Session</a></p>"
+            "<p style='color:#888;'>Once uploaded, start the bot again from "
+            "your usual control email/dashboard.</p>"
             "</body></html>"
         )
     except Exception as e:
@@ -489,6 +498,8 @@ def send_application_confirmation_email(email_target, title, company, location, 
     # for this specific job, so you have the complete picture at a glance.
     qa = (config or {}).get("questionnaire_answers", {})
     experience_years = (config or {}).get("filters", {}).get("experience_years", "")
+    if isinstance(experience_years, list):
+        experience_years = "-".join(experience_years)
     profile_html = f"""
     <h3 style="color:#333;">Your profile details used:</h3>
     <table style="border-collapse: collapse; width: 100%; max-width: 600px;">
@@ -590,14 +601,24 @@ async def run_auto_apply():
 
         cold_log = load_cold_email_log()
 
+        # Naukri's search only accepts a single "experience" value per request
+        # (it returns postings whose range includes that value), so to cover
+        # a broad band like "0 to 3 years" the bot loops over each value in
+        # the list rather than a single number. Accepts either a list
+        # (["0","1","2","3"]) or a legacy single string ("1") in config.json.
+        experience_values = config["filters"]["experience_years"]
+        if not isinstance(experience_values, list):
+            experience_values = [experience_values]
+
         for location in config["filters"]["locations"]:
             for role in config["target_roles"]:
-                print(f"\n⚡ BATCH: Scanning for {role} vacancies inside {location.upper()}...")
+              for experience_years in experience_values:
+                print(f"\n⚡ BATCH: Scanning for {role} vacancies inside {location.upper()} (experience={experience_years})...")
                 formatted_role = role.lower().replace(" ", "-")
                 query_param = role.replace(" ", "%20")
-                
+
                 # Generates dynamic URL mapping target structures safely across Indian metropolitan nodes
-                search_url = f"https://www.naukri.com/{formatted_role}-jobs-in-{location}?k={query_param}&experience={config['filters']['experience_years']}"
+                search_url = f"https://www.naukri.com/{formatted_role}-jobs-in-{location}?k={query_param}&experience={experience_years}"
 
                 navigated = False
                 for attempt in range(3):
@@ -617,23 +638,11 @@ async def run_auto_apply():
 
                 if await is_challenge_page(page):
                     print(f"   [!] Akamai human-verification challenge detected on search page "
-                          f"({role} in {location}). Pausing and waiting for human verification...")
+                          f"({role} in {location}). Aborting this run and requesting a session refresh.")
                     alert_challenge_detected(config["email_target"])
-                    verified = await wait_for_human_verification()
-                    if not verified:
-                        print("   [X] Timed out waiting for human verification. Aborting this run.")
-                        await context.close()
-                        await browser.close()
-                        return
-                    print("   [+] Human verification confirmed. Retrying this search page...")
-                    await page.reload(timeout=30000)
-                    await human_delay(3, 5)
-                    if await is_challenge_page(page):
-                        print("   [X] Challenge still present after verification. Aborting this run.")
-                        alert_challenge_detected(config["email_target"])
-                        await context.close()
-                        await browser.close()
-                        return
+                    await context.close()
+                    await browser.close()
+                    return
 
                 # Naukri's search results wrap each card in a "srp-jobtuple-wrapper"
                 # div (the older "srp-jobtuple" class is no longer used).

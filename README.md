@@ -140,7 +140,7 @@ Then rebuild and restart the container as usual
 ```json
 {
   "target_roles": ["Software Engineer", "..."],
-  "filters": { "experience_years": "0", "locations": ["bangalore", "..."] },
+  "filters": { "experience_years": ["0", "1", "2", "3"], "locations": ["bangalore", "..."] },
   "questionnaire_answers": {
     "current_ctc": "...", "expected_ctc": "...",
     "notice_period": "...", "skills": "..."

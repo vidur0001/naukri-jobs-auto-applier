@@ -61,7 +61,7 @@ DAILY_STATS_PATH = os.path.join(BASE_DIR, "daily_stats.json")
 DEFAULT_PROFILE = {
     "target_roles": ["Software Engineer", "Associate Software Engineer", "Backend Developer", "SRE Engineer", "DevOps Engineer"],
     "filters": {
-        "experience_years": "1",
+        "experience_years": ["0", "1", "2", "3"],
         "locations": ["bangalore", "pune", "hyderabad", "mumbai", "gurgaon", "noida", "delhi", "chandigarh", "chennai"]
     },
     "questionnaire_answers": {
