@@ -841,6 +841,15 @@ async def run_auto_apply():
                             )
                         except Exception as notify_err:
                             print(f"   [-] Could not send rejection email either: {notify_err}")
+
+                # Pace out consecutive search batches (role/location/experience
+                # combinations) with a randomized human-like delay. Firing many
+                # searches back-to-back from the same cloud IP raises Akamai's
+                # risk score and re-triggers the verification challenge even
+                # right after a fresh session login - this pause reduces that.
+                batch_pause = random.uniform(20, 60)
+                print(f"   [i] Pausing {batch_pause:.0f}s before next batch to avoid triggering Akamai...")
+                await asyncio.sleep(batch_pause)
         # Persist any refreshed cookies/tokens back to the portable session file
         # so the next run picks up the latest state.
         await context.storage_state(path=STORAGE_STATE_PATH)
