@@ -42,11 +42,13 @@ AWS EC2 instance inside Docker.
   served read-only at `/dashboard`, showing bot status, today's stats, and
   application history, polling the JSON API every few seconds. Safe to make
   public since it exposes no credentials or control actions.
-- **Remote Naukri login capture** — click "Login to Naukri" on the
-  dashboard to open a live, noVNC-streamed real browser window; log in
-  manually (handles OTP/CAPTCHA naturally), click "Save Session", and the
-  bot picks up the new session automatically. No password ever touches the
-  server.
+- **Remote Naukri login capture (phone-friendly)** — click "Login to Naukri"
+  on the dashboard to open a live, noVNC-streamed real browser window, fully
+  proxied over HTTPS so it also works from a mobile browser; log in manually
+  (handles OTP/CAPTCHA naturally), click "Save Session", and the bot picks up
+  the new session automatically. This is the primary, everyday way to
+  refresh an expired session — no laptop or local Python required.
+  `login_setup.py` (below) is only a local fallback.
 - **HTTPS on a free custom domain** — a Caddy reverse-proxy container
   auto-provisions and renews a Let's Encrypt certificate for a DuckDNS
   domain, so the dashboard is reachable at a stable `https://` URL from any
@@ -64,8 +66,8 @@ AWS EC2 instance inside Docker.
 | `bot.py` | Playwright automation: search, AI scoring, auto-apply, form-filling, emails |
 | `ai_helper.py` | Groq LLM integration: relevance scoring, JD summarization, questionnaire answering |
 | `mailer.py` | SMTP email sending |
-| `login_setup.py` | One-time **local** script to log in to Naukri and save `naukri_storage_state.json` (run outside Docker) |
-| `login_capture.py` | **Remote** noVNC-driven login capture, spawned by `app.py`'s `/login/start` route |
+| `login_setup.py` | **Fallback local** script to log in to Naukri and save `naukri_storage_state.json` (run outside Docker, only needed if the remote flow below is unavailable) |
+| `login_capture.py` | **Primary remote/phone-friendly** noVNC-driven login capture, spawned by `app.py`'s `/login/start` route; validates the homepage loaded before saving the session |
 | `dashboard/` | React + Vite frontend: live status/stats/applications panels, session/login panel |
 | `Caddyfile` | Reverse proxy config: auto HTTPS for the public DuckDNS domain |
 | `config.json` | Target roles, locations, experience filter, questionnaire answers, blacklist, AI settings |
