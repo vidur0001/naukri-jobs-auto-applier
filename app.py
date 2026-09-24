@@ -543,15 +543,112 @@ def login_save():
     threading.Thread(target=_start_bot_after_login_capture, daemon=True).start()
     return "<h2>Saving session... this closes the browser in a few seconds, then the bot will start automatically. You can close this tab and check the dashboard for confirmation.</h2>"
 
+QUICK_LOGIN_SCRIPT_TEMPLATE = '''"""
+Self-contained Naukri login helper - no other project files needed.
+
+Run this on ANY computer (borrowed laptop, library PC, etc.), even one that
+has never seen this project before:
+
+    pip install playwright requests
+    playwright install chromium
+    python quick_login.py
+
+It opens a real Chromium window, you log in to Naukri normally (Email +
+Password, complete OTP/CAPTCHA if asked), press Enter back here once you see
+your homepage, and it uploads the session straight to the server - no manual
+file transfer, no repo checkout required.
+"""
+import sys
+import tempfile
+import requests
+from playwright.sync_api import sync_playwright
+
+UPLOAD_URL = "{upload_url}"
+
+
+def main():
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context(viewport={{"width": 1280, "height": 800}})
+        page = context.new_page()
+        try:
+            page.goto("https://www.naukri.com/nlogin/login", wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            print(f"[!] Could not load the Naukri login page: {{e}}")
+            browser.close()
+            sys.exit(1)
+
+        print("\\n[*] A browser window has opened.")
+        print("[*] Log in using the Email + Password fields (NOT 'Login with Google').")
+        print("[*] Do not close the browser window yourself.")
+
+        while True:
+            input("[*] Once you see your homepage/profile, press Enter here to verify... ")
+            try:
+                current_url = page.url
+                still_on_login = "login" in current_url.lower()
+                profile_count = page.locator(
+                    "[class*='nI-gNb-drawer'], [class*='user-name'], #root_drawerBtn"
+                ).count()
+            except Exception:
+                print("[!] The browser window was closed before login could be verified. Run this script again.")
+                sys.exit(1)
+
+            if still_on_login or profile_count == 0:
+                print(f"[!] Doesn't look like you're logged in yet (URL: {{current_url}}). Try again.")
+                continue
+            print(f"[+] Login looks confirmed (URL: {{current_url}}).")
+            break
+
+        page.wait_for_timeout(3000)
+        state_path = tempfile.mktemp(suffix=".json")
+        context.storage_state(path=state_path)
+        browser.close()
+
+    print("[*] Uploading session to the server...")
+    with open(state_path, "rb") as f:
+        resp = requests.post(UPLOAD_URL, files={{"session_file": ("naukri_storage_state.json", f, "application/json")}})
+    if resp.status_code == 200:
+        print("[+] Uploaded successfully! The bot will resume automatically.")
+    else:
+        print(f"[!] Upload failed ({{resp.status_code}}): {{resp.text[:300]}}")
+        print(f"[!] The session file was saved locally at: {{state_path}}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+@app.route("/quick-login.py")
+def quick_login_script():
+    _require_challenge_token()
+    upload_url = f"{APP_BASE_URL}/session/upload?token={CHALLENGE_ACCESS_TOKEN}"
+    script = QUICK_LOGIN_SCRIPT_TEMPLATE.format(upload_url=upload_url)
+    return app.response_class(
+        script,
+        mimetype="text/x-python",
+        headers={"Content-Disposition": "attachment; filename=quick_login.py"},
+    )
+
+
 @app.route("/session/upload", methods=["GET", "POST"])
 def session_upload():
     _require_challenge_token()
     if request.method == "GET":
+        quick_login_url = f"{APP_BASE_URL}/quick-login.py?token={CHALLENGE_ACCESS_TOKEN}"
         return render_template_string("""
             <html><body style="font-family: Arial, sans-serif; color: #333; max-width:600px; margin:40px auto;">
                 <h2>⬆️ Upload Refreshed Naukri Session</h2>
-                <p>Run <code>python login_setup.py</code> on your own laptop, log in normally,
-                   then select the <code>naukri_storage_state.json</code> it creates below.</p>
+                <p><b>On any computer</b> (even one that's never seen this project), run:</p>
+                <pre style="background:#f4f4f4;padding:12px;border-radius:4px;overflow-x:auto;">curl -o quick_login.py "{{ quick_login_url }}"
+pip install playwright requests
+playwright install chromium
+python quick_login.py</pre>
+                <p>It logs in and uploads the session automatically - no manual file selection needed.
+                   Or, if you already have <code>naukri_storage_state.json</code> from
+                   <code>login_setup.py</code>, select it below instead:</p>
                 <form method="POST" enctype="multipart/form-data">
                     <input type="hidden" name="token" value="{{ token }}">
                     <input type="file" name="session_file" accept="application/json" required>
@@ -560,7 +657,7 @@ def session_upload():
                         border:none; border-radius:4px; font-weight:bold; cursor:pointer;">Upload</button>
                 </form>
             </body></html>
-        """, token=CHALLENGE_ACCESS_TOKEN)
+        """, token=CHALLENGE_ACCESS_TOKEN, quick_login_url=quick_login_url)
 
     uploaded = request.files.get("session_file")
     if not uploaded or not uploaded.filename:
