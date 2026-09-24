@@ -61,23 +61,45 @@ async def main():
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
         page = await context.new_page()
-        await page.goto("https://www.naukri.com/nlogin/login")
+        try:
+            # "domcontentloaded" fires once the page is actually usable, without
+            # waiting for every third-party tracker/ad script to finish (which
+            # is what caused the default "load" event to time out at 30s).
+            # A longer timeout also gives slow connections more headroom.
+            await page.goto(
+                "https://www.naukri.com/nlogin/login",
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+        except Exception as e:
+            print(f"[!] Could not load the Naukri login page: {e}")
+            print("[!] Check your internet connection and try running this script again.")
+            await context.close()
+            return
 
         print("\n[*] A browser window has opened.")
         print("[*] IMPORTANT: Log in using the Email + Password fields.")
         print("[*] Do NOT use the 'Login with Google' / Gmail button - that session")
         print("[*] will NOT work once replayed inside the Docker container.")
+        print("[*] Do NOT close the browser window yourself - this script closes it")
+        print("[*] automatically once the session is saved.")
 
         while True:
             input("[*] Once you are logged in and see your dashboard (your name/photo visible), press Enter here to verify... ")
 
-            current_url = page.url
-            # Naukri redirects logged-in users away from the login page, usually to
-            # something like naukri.com/mnjuser/homepage.
-            still_on_login = "login" in current_url.lower()
-            profile_count = await page.locator(
-                "[class*='nI-gNb-drawer'], [class*='user-name'], #root_drawerBtn"
-            ).count()
+            try:
+                current_url = page.url
+                # Naukri redirects logged-in users away from the login page, usually to
+                # something like naukri.com/mnjuser/homepage.
+                still_on_login = "login" in current_url.lower()
+                profile_count = await page.locator(
+                    "[class*='nI-gNb-drawer'], [class*='user-name'], #root_drawerBtn"
+                ).count()
+            except Exception:
+                print("[!] The browser window was closed before login could be verified.")
+                print("[!] Please run this script again and leave the browser window open")
+                print("[!] until you see the 'Session saved' message below.")
+                return
 
             if still_on_login or profile_count == 0:
                 print(f"[!] Doesn't look like you're logged in yet (URL: {current_url}).")
@@ -90,11 +112,17 @@ async def main():
                 print(f"[+] Login looks confirmed (URL: {current_url}).")
                 break
 
-        # Give the browser a moment to flush cookies/local storage to disk
-        # before we close the context.
-        await page.wait_for_timeout(3000)
-        await context.storage_state(path=STORAGE_STATE_PATH)
-        await context.close()
+        try:
+            # Give the browser a moment to flush cookies/local storage to disk
+            # before we close the context.
+            await page.wait_for_timeout(3000)
+            await context.storage_state(path=STORAGE_STATE_PATH)
+            await context.close()
+        except Exception as e:
+            print(f"[!] Browser closed unexpectedly before the session could be saved: {e}")
+            print("[!] Please run this script again and leave the browser window open throughout.")
+            return
+
         print(f"[+] Session saved to: {USER_DATA_DIR}")
         print(f"[+] Portable session state saved to: {STORAGE_STATE_PATH}")
         print("[+] You can now run the bot normally via app.py / bot.py.")

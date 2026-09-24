@@ -30,13 +30,18 @@ BOT_AUTO_DISABLED_FLAG = os.path.join(BASE_DIR, "bot_auto_disabled.flag")
 # scan finishes (bot.py exits after one full pass) instead of sitting idle
 # until someone clicks "Start Bot" by hand.
 AUTO_RESTART_STATE_PATH = os.path.join(BASE_DIR, "auto_restart_state.json")
-# Gap before relaunching after a normal, full-length run.
-RESTART_INTERVAL_MINUTES = int(os.getenv("RESTART_INTERVAL_MINUTES", "30"))
-# Gap before relaunching after a run that ended almost immediately (expired
-# session / Akamai challenge - bot.py already emails you when that happens).
-# Longer, so it doesn't hammer Naukri or your inbox while waiting for you to
-# upload a refreshed session.
-FAILURE_BACKOFF_MINUTES = int(os.getenv("FAILURE_BACKOFF_MINUTES", "120"))
+# Gap before relaunching after a normal, full-length run. Kept fairly long
+# so the bot doesn't scan too frequently from the same cloud IP (reduces how
+# often Akamai's risk scoring flags the traffic as suspicious).
+RESTART_INTERVAL_MINUTES = int(os.getenv("RESTART_INTERVAL_MINUTES", "60"))
+# Gap before relaunching after a run that ended almost immediately (no
+# session file / expired session - bot.py already emails you when that
+# happens; Akamai challenges no longer abort the run so they don't hit this
+# path anymore). Set to 0 (retry on the scheduler's very next 60s tick) so
+# that once you upload a refreshed session it's picked up immediately
+# instead of sitting idle - the 10-minute alert-email throttle already
+# prevents inbox spam if the session is still broken.
+FAILURE_BACKOFF_MINUTES = int(os.getenv("FAILURE_BACKOFF_MINUTES", "0"))
 QUICK_FAIL_SECONDS = 180
 # Written by this Flask process when the "I've solved it, resume" button is
 # clicked; bot.py polls for this file while it's paused on an Akamai
@@ -257,6 +262,28 @@ def send_approval_email(config):
     )
     send_email(config["email_target"], "🐳 Naukri Bot is running via Docker - control it here", html_body)
 
+def get_external_site_jobs_for_date(for_date):
+    """Returns applications_log.json entries with status external_site_skip
+    whose timestamp falls on for_date (an ISO date string, local/IST time),
+    so the daily digest can list jobs that need a manual apply."""
+    try:
+        with open(APPLICATIONS_LOG_PATH, "r") as f:
+            entries = json.load(f)
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        entries = []
+
+    matches = []
+    for entry in entries:
+        if entry.get("status") != "external_site_skip":
+            continue
+        ts = entry.get("timestamp")
+        if not ts:
+            continue
+        entry_date = datetime.fromtimestamp(ts).date().isoformat()
+        if entry_date == for_date:
+            matches.append(entry)
+    return matches
+
 def send_daily_summary_email(email_target, for_date=None):
     for_date = for_date or date.today().isoformat()
     try:
@@ -270,6 +297,32 @@ def send_daily_summary_email(email_target, for_date=None):
     applied = day_stats.get("applied", 0)
     skipped_or_pending = max(found - applied, 0)
 
+    external_jobs = get_external_site_jobs_for_date(for_date)
+    external_html = ""
+    if external_jobs:
+        rows = "".join(
+            f"""<tr>
+                <td style="padding:8px;border:1px solid #ddd;">{e.get('title','')}</td>
+                <td style="padding:8px;border:1px solid #ddd;">{e.get('company','')}</td>
+                <td style="padding:8px;border:1px solid #ddd;">{e.get('location','')}</td>
+                <td style="padding:8px;border:1px solid #ddd;"><a href="{e.get('link','')}">Open</a></td>
+            </tr>"""
+            for e in external_jobs
+        )
+        external_html = f"""
+        <h3 style="color:#FF9800;margin-top:20px;">🔗 Needs Manual Apply (Company Site) - {len(external_jobs)}</h3>
+        <p style="color:#888;">These jobs redirect to the company's own external career site, which the bot skips automatically. Apply manually if interested.</p>
+        <table style="border-collapse: collapse; width: 100%; max-width: 600px;">
+            <tr>
+                <th style="padding:8px;border:1px solid #ddd;text-align:left;">Title</th>
+                <th style="padding:8px;border:1px solid #ddd;text-align:left;">Company</th>
+                <th style="padding:8px;border:1px solid #ddd;text-align:left;">Location</th>
+                <th style="padding:8px;border:1px solid #ddd;text-align:left;">Link</th>
+            </tr>
+            {rows}
+        </table>
+        """
+
     html_body = f"""
     <html><body style="font-family: Arial, sans-serif; color: #333;">
         <h2 style="color: #2196F3;">📊 Daily Summary - {for_date}</h2>
@@ -279,6 +332,7 @@ def send_daily_summary_email(email_target, for_date=None):
             <tr><td style="padding:8px;border:1px solid #ddd;"><b>Skipped / no response</b></td><td style="padding:8px;border:1px solid #ddd;">{skipped_or_pending}</td></tr>
         </table>
         <p style="margin-top:15px;color:#888;">Applied {applied} out of {found} jobs the bot found and emailed you about today.</p>
+        {external_html}
     </body></html>
     """
     send_email(email_target, f"📊 Daily Summary ({for_date}): Applied {applied}/{found}", html_body)
@@ -414,13 +468,31 @@ def api_session_status():
 def login_start():
     _require_challenge_token()
     if is_bot_running():
-        return "<h2>Stop the bot first before capturing a new login session (they share the same browser display).</h2>"
+        # Login capture and the bot share the same Xvfb display, so the bot
+        # must be off first. Rather than blocking with a message and forcing
+        # a separate manual "Stop Bot" click (a confusing dead-end when
+        # arriving here from the "Stop Bot" email), stop it automatically and
+        # give it a moment to fully exit before opening the login browser.
+        stop_bot()
+        for _ in range(20):
+            if not is_bot_running():
+                break
+            time.sleep(0.5)
     started = start_login_capture()
     if not started and not is_login_capture_running():
         return "<h2>Could not start the login browser. Check container logs.</h2>", 500
-    host = request.host.split(":")[0]
+    # Routed through Caddy on the same scheme/host as the page itself
+    # (see Caddyfile's /vnc* + /websockify* proxy blocks) instead of a raw
+    # http://host:6080 URL - a plain-HTTP iframe/websocket loaded from an
+    # HTTPS page is blocked by browsers as mixed content, which left this
+    # view blank when accessed via https://naukri-bot.duckdns.org.
+    # Caddy terminates TLS and forwards plain HTTP internally, so
+    # request.scheme always reports "http" here - use X-Forwarded-Proto
+    # (set by Caddy's reverse_proxy by default) to know the scheme the
+    # browser actually connected with.
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
     novnc_url = (
-        f"http://{host}:{NOVNC_PORT}/vnc.html?autoconnect=true&resize=scale"
+        f"{scheme}://{request.host}/vnc.html?autoconnect=true&resize=scale"
         f"&password={VNC_PASSWORD}"
     )
     save_url = f"{APP_BASE_URL}/login/save?token={CHALLENGE_ACCESS_TOKEN}"
@@ -441,13 +513,35 @@ def login_start():
         </body></html>
     """, novnc_url=novnc_url, save_url=save_url)
 
+def _start_bot_after_login_capture():
+    # login_capture.py verifies login actually succeeded before writing the
+    # session file, then exits on its own - poll for it to finish, then start
+    # the bot automatically so a fresh login goes straight back to scanning
+    # without a separate manual "Start Bot" click. If it's still running
+    # after the wait (e.g. login took longer, or a premature "Save Session"
+    # click was rejected and it's waiting for another attempt), don't start
+    # the bot yet - it'll auto-start once login_capture actually exits, since
+    # /login/save is called again after each Save Session click.
+    for _ in range(120):  # up to ~60s, generous since OTP/CAPTCHA can be slow
+        if not is_login_capture_running():
+            break
+        time.sleep(0.5)
+    else:
+        print("[-] Login capture still in progress after 60s - not starting the bot yet.")
+        return
+    if start_bot():
+        print("[+] Bot auto-started after fresh login session was saved.")
+    else:
+        print("[-] Could not auto-start bot after login save (already running or failed).")
+
 @app.route("/login/save")
 def login_save():
     _require_challenge_token()
     with open(LOGIN_SAVE_FLAG, "w") as f:
         f.write("save")
     print("[+] Login save requested via webhook. Waiting for login_capture.py to write the session file.")
-    return "<h2>Saving session... this closes the browser in a few seconds. You can close this tab and check the dashboard for confirmation.</h2>"
+    threading.Thread(target=_start_bot_after_login_capture, daemon=True).start()
+    return "<h2>Saving session... this closes the browser in a few seconds, then the bot will start automatically. You can close this tab and check the dashboard for confirmation.</h2>"
 
 @app.route("/session/upload", methods=["GET", "POST"])
 def session_upload():
@@ -481,7 +575,13 @@ def session_upload():
     except (json.JSONDecodeError, OSError) as e:
         return f"<h2>Could not save session file: {e}</h2>", 400
     print("[+] Naukri session refreshed via /session/upload.")
-    return "<h2>✅ Session uploaded successfully. You can start the bot again now.</h2>"
+    # Match the /login/save behavior - a freshly uploaded session should mean
+    # the bot goes straight back to scanning, not sit idle waiting for a
+    # separate manual "Start Bot" click.
+    if start_bot():
+        print("[+] Bot auto-started after fresh session upload.")
+        return "<h2>✅ Session uploaded successfully. Bot is starting automatically.</h2>"
+    return "<h2>✅ Session uploaded successfully. (Bot was already running - it will use the new session on its next restart, or click Stop then Start to apply it immediately.)</h2>"
 
 @app.route("/")
 def index():
@@ -541,11 +641,13 @@ def resume_auto_apply():
 @app.route("/solve-challenge")
 def solve_challenge():
     _require_challenge_token()
-    # Derive the noVNC host from whatever host the request came in on (works
-    # whether APP_BASE_URL is an IP, a domain, or localhost during testing).
-    host = request.host.split(":")[0]
+    # Routed through Caddy on the same scheme/host as the page itself (see
+    # Caddyfile's /vnc* + /websockify* proxy blocks) instead of a raw
+    # http://host:6080 URL, which browsers block as mixed content when the
+    # page itself is loaded over HTTPS.
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
     novnc_url = (
-        f"http://{host}:{NOVNC_PORT}/vnc.html?autoconnect=true&resize=scale"
+        f"{scheme}://{request.host}/vnc.html?autoconnect=true&resize=scale"
         f"&password={VNC_PASSWORD}"
     )
     resume_url = f"{APP_BASE_URL}/solve-challenge/resume?token={CHALLENGE_ACCESS_TOKEN}"

@@ -63,12 +63,23 @@ async def is_challenge_page(page):
         return False
     return any(marker in body_text for marker in CHALLENGE_MARKERS)
 
+_last_session_expired_alert_ts = 0
+
 def alert_session_expired(email_target):
     """Notifies that the saved Naukri session is invalid/expired and the bot
     has stopped. Since re-logging in from this cloud server tends to trigger
     repeated Akamai puzzles, the fix is to refresh the session from a home/
     personal network via login_setup.py, then upload the resulting file here
     - no manual scp needed."""
+    # Throttle to at most one alert per 10 minutes - without this, a bad
+    # session left in place gets re-detected as "expired" on every
+    # auto_restart_scheduler retry (every ~60s), flooding the inbox with
+    # duplicate emails until someone fixes it.
+    global _last_session_expired_alert_ts
+    now = time.time()
+    if now - _last_session_expired_alert_ts < 600:
+        return
+    _last_session_expired_alert_ts = now
     upload_url = f"{APP_BASE_URL}/session/upload?token={CHALLENGE_ACCESS_TOKEN}"
     login_url = f"{APP_BASE_URL}/login/start?token={CHALLENGE_ACCESS_TOKEN}"
     try:
@@ -572,6 +583,12 @@ async def run_auto_apply():
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
+                # Extra anti-fingerprinting flags - cheap to add, harmless if
+                # they don't help, but remove some more of the tell-tale
+                # signals headless/automated Chromium normally exposes.
+                "--disable-infobars",
+                "--window-size=1280,800",
+                "--lang=en-IN",
             ],
             ignore_default_args=["--enable-automation"],
         )
@@ -602,6 +619,21 @@ async def run_auto_apply():
         await page.goto("https://www.naukri.com/mnjuser/homepage")
         await human_delay(3, 5)
 
+        # Human-like browsing on the homepage before ever touching a search
+        # URL - a real person scrolls/moves the mouse around after landing,
+        # they don't teleport straight into a search query. This, combined
+        # with the longer warm-up pause below, makes the very first search
+        # look less like an automated script to Akamai's risk scoring.
+        try:
+            for _ in range(random.randint(2, 4)):
+                await page.mouse.move(
+                    random.randint(100, 1000), random.randint(100, 600), steps=random.randint(5, 15)
+                )
+                await page.mouse.wheel(0, random.randint(200, 600))
+                await human_delay(1, 3)
+        except Exception:
+            pass  # purely cosmetic - never let this block the actual run
+
         if "login" in page.url.lower():
             print("[X] Execution Halted: The saved session has expired. Please run login_setup.py locally.")
             alert_session_expired(config["email_target"])
@@ -610,6 +642,14 @@ async def run_auto_apply():
             return
 
         print("[+] Token storage authenticated. Launching systematic sequence processing...")
+
+        # Human-like warm-up: don't fire the very first search the instant the
+        # browser opens/authenticates. A real person browses around a bit
+        # first - an immediate rapid-fire search right after page load is one
+        # of the "bot-like" signals Akamai's risk scoring picks up on.
+        warmup_pause = random.uniform(45, 90)
+        print(f"   [i] Warming up {warmup_pause:.0f}s before first search to avoid triggering Akamai...")
+        await asyncio.sleep(warmup_pause)
 
         cold_log = load_cold_email_log()
 
@@ -649,18 +689,32 @@ async def run_auto_apply():
                 await human_delay(4, 6)
 
                 if await is_challenge_page(page):
+                    # Don't kill the whole run over a single search hitting a
+                    # challenge - the session itself is very likely still
+                    # valid (this isn't a login redirect). Just skip this one
+                    # role/location/experience combination, cool down a bit
+                    # longer than usual, and keep scanning the rest of the
+                    # list instead of getting stuck for a 120-minute backoff.
                     print(f"   [!] Akamai human-verification challenge detected on search page "
-                          f"({role} in {location}). Aborting this run and requesting a session refresh.")
+                          f"({role} in {location}, experience={experience_years}). Skipping this combination "
+                          f"and continuing with the rest of the scan.")
                     alert_challenge_detected(config["email_target"])
-                    await context.close()
-                    await browser.close()
-                    return
+                    cooldown = random.uniform(90, 180)
+                    print(f"   [i] Cooling down {cooldown:.0f}s before the next search...")
+                    await asyncio.sleep(cooldown)
+                    continue
 
                 # Naukri's search results wrap each card in a "srp-jobtuple-wrapper"
                 # div (the older "srp-jobtuple" class is no longer used).
                 job_tuples = await page.locator(".srp-jobtuple-wrapper").all()
                 print(f"   [i] Found {len(job_tuples)} job tuples on page (URL: {page.url}).")
-                for card in job_tuples[:10]:  # Limit top 10 items per cycle array to preserve behavioral integrity
+                for card in job_tuples[:20]:  # Process the full first results page (Naukri returns ~20/page)
+                    # Small human-like gap before looking at each job card -
+                    # a real person doesn't jump from one listing straight to
+                    # the next instantly. Kept short so throughput isn't
+                    # badly hurt, just enough to soften the "superfast" burst
+                    # pattern within a single search batch.
+                    await human_delay(3, 8)
                     try:
                         comp_name = "Unknown Company"
                         comp_loc = card.locator("a.comp-name")
@@ -726,6 +780,20 @@ async def run_auto_apply():
                                 if detail_sal_text:
                                     exact_salary = detail_sal_text
 
+                            # Skip anything that isn't a native Naukri apply - detect
+                            # this now (before AI scoring/decision email/grace period)
+                            # so we don't waste an entire pipeline pass, a JD summary
+                            # call, and 45s of waiting on a job we can never submit.
+                            detail_apply_btn = detail_page.locator("button:has-text('Apply')").first
+                            if await detail_apply_btn.count() > 0:
+                                detail_btn_text = await detail_apply_btn.inner_text()
+                                if "company site" in detail_btn_text.lower():
+                                    print(f"   [-] Skipping (external company-site apply, not on Naukri): {job_title} @ {comp_name}")
+                                    mark_job_seen(seen_jobs, link, "external_site_skip")
+                                    log_application_event(job_title, comp_name, location, link, "external_site_skip")
+                                    await detail_page.close()
+                                    continue
+
                             await detail_page.close()
                         except Exception as jd_err:
                             print(f"   [-] Could not fetch full JD for {job_title} @ {comp_name}: {jd_err}")
@@ -768,13 +836,17 @@ async def run_auto_apply():
                         await human_delay(3, 5)
 
                         if await is_challenge_page(job_page):
+                            # Same as the search-page case - skip just this
+                            # one job posting and keep scanning instead of
+                            # tearing down the whole browser/run.
                             print(f"   [!] Akamai human-verification challenge detected on job page "
-                                  f"({job_title} @ {comp_name}). Aborting this run early.")
+                                  f"({job_title} @ {comp_name}). Skipping this job and continuing.")
                             alert_challenge_detected(config["email_target"])
+                            mark_job_seen(seen_jobs, link, "akamai_challenge_skip")
+                            log_application_event(job_title, comp_name, location, link, "akamai_challenge_skip")
                             await job_page.close()
-                            await context.close()
-                            await browser.close()
-                            return
+                            await human_delay(10, 20)
+                            continue
 
                         apply_btn = job_page.locator("button:has-text('Apply')").first
                         if await apply_btn.count() > 0:
@@ -847,7 +919,7 @@ async def run_auto_apply():
                 # searches back-to-back from the same cloud IP raises Akamai's
                 # risk score and re-triggers the verification challenge even
                 # right after a fresh session login - this pause reduces that.
-                batch_pause = random.uniform(20, 60)
+                batch_pause = random.uniform(60, 150)
                 print(f"   [i] Pausing {batch_pause:.0f}s before next batch to avoid triggering Akamai...")
                 await asyncio.sleep(batch_pause)
         # Persist any refreshed cookies/tokens back to the portable session file

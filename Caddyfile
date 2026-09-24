@@ -5,8 +5,32 @@
 
 	# On the public domain, send "/" straight to the dashboard instead of the
 	# raw Flask "/" route, which triggers an email notification on every hit.
-	# The IP-based URL (http://13.61.172.107:5000/) is untouched for that.
+	# The IP-based URL (http://<elastic-ip>:5000/) is untouched for that.
 	redir / /dashboard permanent
+
+	# Proxy noVNC (websockify) through the same HTTPS domain/port instead of
+	# a raw HTTP port - browsers block an http:// iframe/websocket loaded
+	# from an https:// page (mixed content), which otherwise left the
+	# /login/start and /solve-challenge live-browser views blank.
+	# vnc.html itself pulls in /app/*, /core/*, /vendor/* static assets and
+	# opens a /websockify websocket - all of these (not just /vnc.html
+	# itself) must be proxied to noVNC's server, or the page loads with a
+	# blank feed and 404s for its JS/CSS.
+	handle /vnc* {
+		reverse_proxy naukri-bot:6080
+	}
+	handle /app/* {
+		reverse_proxy naukri-bot:6080
+	}
+	handle /core/* {
+		reverse_proxy naukri-bot:6080
+	}
+	handle /vendor/* {
+		reverse_proxy naukri-bot:6080
+	}
+	handle /websockify* {
+		reverse_proxy naukri-bot:6080
+	}
 
 	reverse_proxy naukri-bot:5000
 }

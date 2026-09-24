@@ -69,21 +69,44 @@ async def main():
         poll_interval = 1
         while waited < TIMEOUT_SECONDS:
             if os.path.exists(LOGIN_SAVE_FLAG):
-                break
+                os.remove(LOGIN_SAVE_FLAG)
+
+                # Verify login actually succeeded before saving - clicking
+                # "Save Session" too early (e.g. mid-OTP, or Akamai still
+                # showing a challenge) would otherwise silently persist a
+                # logged-out/invalid session that bot.py immediately rejects
+                # as "expired" on its very next run. Same check login_setup.py
+                # uses for its local/interactive flow.
+                try:
+                    current_url = page.url
+                    still_on_login = "login" in current_url.lower()
+                    profile_count = await page.locator(
+                        "[class*='nI-gNb-drawer'], [class*='user-name'], #root_drawerBtn"
+                    ).count()
+                except Exception:
+                    print("[!] Browser closed unexpectedly while checking login state.")
+                    await context.close()
+                    await browser.close()
+                    return
+
+                if still_on_login or profile_count == 0:
+                    print(f"[!] Save Session clicked but login doesn't look complete yet "
+                          f"(URL: {current_url}). Ignoring this click - finish logging in "
+                          f"and click Save Session again.")
+                    continue
+
+                # Give cookies/localStorage a moment to flush before capturing.
+                await page.wait_for_timeout(1500)
+                await context.storage_state(path=STORAGE_STATE_PATH)
+                print(f"[+] Session saved to {STORAGE_STATE_PATH}.")
+                await context.close()
+                await browser.close()
+                return
+
             await asyncio.sleep(poll_interval)
             waited += poll_interval
 
-        if not os.path.exists(LOGIN_SAVE_FLAG):
-            print("[!] Timed out waiting for Save Session click. Closing without saving.")
-            await context.close()
-            await browser.close()
-            return
-
-        # Give cookies/localStorage a moment to flush before capturing.
-        await page.wait_for_timeout(1500)
-        await context.storage_state(path=STORAGE_STATE_PATH)
-        os.remove(LOGIN_SAVE_FLAG)
-        print(f"[+] Session saved to {STORAGE_STATE_PATH}.")
+        print("[!] Timed out waiting for Save Session click. Closing without saving.")
         await context.close()
         await browser.close()
 

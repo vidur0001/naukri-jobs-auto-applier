@@ -3,6 +3,7 @@ FROM python:3.10-slim
 # Install system dependencies needed for Playwright headless execution
 RUN apt-get update && apt-get install -y \
     wget \
+    curl \
     gnupg \
     xvfb \
     x11vnc \
